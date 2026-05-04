@@ -91,15 +91,13 @@ def pps_sample_indices_batched(
     else:
         top_idx = torch.empty(N, 0, device=device, dtype=torch.long)
     
-    # Create mask for tail (exclude head indices)
-    head_mask = torch.zeros(N, V, device=device, dtype=torch.bool)
-    if k_head > 0:
-        head_mask.scatter_(1, top_idx, True)
-    
     # Renormalize probabilities over tail
     tail_probs = probs.clone()
-    tail_probs[head_mask] = 0.0
-    tail_sum = tail_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    if k_head > 0:
+        tail_probs.scatter_(1, top_idx, 0.0)
+        tail_sum = (1.0 - torch.gather(probs, 1, top_idx).sum(dim=-1, keepdim=True)).clamp_min(1e-12)
+    else:
+        tail_sum = tail_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     tail_probs = tail_probs / tail_sum
     
     # PPS sampling from tail with replacement
@@ -120,20 +118,20 @@ def pps_sample_indices_batched(
         diff = torch.diff(all_idx_sorted, dim=-1, prepend=all_idx_sorted[:, :1] - 1)
         keep_mask = diff != 0
         
-        # Count unique per row
+        # Compact unique indices without a Python row loop
         counts = keep_mask.sum(dim=-1)
-        max_unique = counts.max().item()
-        
-        # Extract unique indices with padding
-        S_max = min(k_head + k_tail, max_unique)
+        S_max = min(k_head + k_tail, counts.max().item())
+        positions = keep_mask.cumsum(dim=-1) - 1
+        valid = keep_mask & (positions < S_max)
+
         indices = torch.zeros(N, S_max, device=device, dtype=torch.long)
         mask = torch.zeros(N, S_max, device=device, dtype=torch.bool)
-        
-        for i in range(N):
-            unique_i = all_idx_sorted[i][keep_mask[i]]
-            n_i = min(len(unique_i), S_max)
-            indices[i, :n_i] = unique_i[:n_i]
-            mask[i, :n_i] = True
+
+        row_idx = torch.arange(N, device=device).unsqueeze(1).expand_as(all_idx_sorted)
+        compact_rows = row_idx[valid]
+        compact_cols = positions[valid]
+        indices[compact_rows, compact_cols] = all_idx_sorted[valid]
+        mask[compact_rows, compact_cols] = True
     else:
         # No tail sampling
         indices = top_idx
