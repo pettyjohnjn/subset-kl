@@ -8,19 +8,33 @@ import torch.nn.functional as F
 from subset_kl import (
     # Core functional
     select_topk_indices,
+    select_head_tail_indices,
     select_indices_with_sampling,
     select_indices_with_importance_sampling,
     subset_kl_from_gathered,
+    subset_k2_kl_from_gathered,
+    subset_k3_kl_from_gathered,
+    subset_mc_kl_from_gathered,
+    subset_hajek_kl_from_gathered,
     compute_subset_kl,
+    compute_subset_k2_kl,
+    compute_subset_k3_kl,
+    compute_subset_mc_kl,
+    compute_subset_hajek_kl,
+    evaluate_tail_proposal_grid,
     full_kl,
     # Classes
     SubsetKLLoss,
+    SubsetK2KLLoss,
+    SubsetK3KLLoss,
+    SubsetMonteCarloKLLoss,
+    SubsetHajekKLLoss,
     KLDivergenceLoss,
-    HajekKLLoss,
+    FrankensteinKLLoss,
     ImportanceKLLoss,
     # Sampling
     pps_sample_indices_batched,
-    hajek_kl_estimate,
+    frankenstein_kl_estimate,
     # Base
     apply_reduction,
 )
@@ -121,6 +135,64 @@ class TestSelectIndicesWithImportanceSampling:
         assert mask.any()
 
 
+class TestSelectHeadTailIndices:
+    """Tests for top-k head plus teacher-tail sampling."""
+
+    def test_basic_shapes(self, small_logits):
+        """Test output shapes."""
+        teacher, _ = small_logits
+        B, T, V = teacher.shape
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=12, k_tail=7
+        )
+
+        assert indices.shape == (B, T, 19)
+        assert teacher_log_probs.shape == (B, T, 19)
+        assert p_head.shape == (B, T)
+        assert (indices >= 0).all()
+        assert (indices < V).all()
+        assert (p_head >= 0).all()
+        assert (p_head <= 1).all()
+
+    def test_tail_excludes_head(self, small_logits):
+        """Test sampled tail tokens do not include deterministic head tokens."""
+        teacher, _ = small_logits
+        k_head = 10
+        k_tail = 16
+
+        indices, _, _ = select_head_tail_indices(teacher, k_head=k_head, k_tail=k_tail)
+        head = indices[..., :k_head]
+        tail = indices[..., k_head:]
+
+        assert not (tail.unsqueeze(-1) == head.unsqueeze(-2)).any()
+
+    def test_mixed_tail_proposal_returns_selected_log_probs(self, small_logits):
+        """Test mixed proposal samples from the tail and returns q for weights."""
+        teacher, _ = small_logits
+        k_head = 10
+        k_tail = 16
+
+        indices, teacher_log_probs, p_head, proposal_log_probs = select_head_tail_indices(
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            tail_proposal="mixed",
+            tail_proposal_alpha=0.8,
+            tail_proposal_tau=0.7,
+            return_tail_proposal_log_probs=True,
+        )
+
+        assert indices.shape[-1] == k_head + k_tail
+        assert teacher_log_probs.shape == indices.shape
+        assert p_head.shape == teacher.shape[:-1]
+        assert proposal_log_probs.shape == teacher_log_probs[..., k_head:].shape
+        assert torch.isfinite(proposal_log_probs).all()
+        assert not (
+            indices[..., k_head:].unsqueeze(-1) == indices[..., :k_head].unsqueeze(-2)
+        ).any()
+
+
 class TestSubsetKLFromGathered:
     """Tests for subset_kl_from_gathered."""
     
@@ -193,6 +265,140 @@ class TestSubsetKLFromGathered:
         assert not torch.allclose(loss_masked, loss_unmasked)
 
 
+class TestSubsetK2KLFromGathered:
+    """Tests for the subset K2 tail objective."""
+
+    def test_basic(self, small_logits):
+        """Test basic computation."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        loss = subset_k2_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        assert loss.dim() == 0
+        assert loss.item() >= 0
+        assert torch.isfinite(loss)
+
+    def test_gradient_flow(self, small_logits):
+        """Test gradients flow through selected student logits."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+        loss = subset_k2_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+        loss.backward()
+
+        assert student.grad is not None
+        assert torch.isfinite(student.grad).all()
+
+    def test_requires_full_student_normalizer_for_tail(self, small_logits):
+        """Test the K2 tail cannot silently use selected-subset Q."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+
+        with pytest.raises(ValueError, match="student_log_normalizer is required"):
+            subset_k2_kl_from_gathered(
+                student_selected,
+                teacher_log_probs,
+                k_head=k_head,
+                k_tail=k_tail,
+                p_head=p_head,
+            )
+
+    def test_tail_matches_full_vocab_k2_formula(self, small_logits):
+        """Test tail uses log Q from the full student distribution."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        generator = torch.Generator().manual_seed(123)
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail, generator=generator
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        actual = subset_k2_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            reduction="none",
+        )
+
+        head_idx = indices[..., :k_head]
+        tail_idx = indices[..., k_head:]
+        teacher_head = torch.gather(teacher, -1, head_idx)
+        student_head = torch.gather(student, -1, head_idx)
+        teacher_head_log_probs = F.log_softmax(teacher_head, dim=-1)
+        student_head_log_probs = F.log_softmax(student_head, dim=-1)
+        head = (
+            teacher_head_log_probs.exp()
+            * (teacher_head_log_probs - student_head_log_probs)
+        ).sum(dim=-1)
+
+        teacher_full_log_probs = F.log_softmax(teacher.float(), dim=-1)
+        student_full_log_probs = F.log_softmax(student.float(), dim=-1)
+        teacher_tail = torch.gather(teacher_full_log_probs, -1, tail_idx)
+        student_tail = torch.gather(student_full_log_probs, -1, tail_idx)
+        expected = head + (1.0 - p_head.detach()) * (
+            teacher_tail - student_tail
+        ).square().sum(dim=-1) / k_tail
+
+        assert torch.allclose(actual, expected)
+
+    def test_no_tail_matches_topk(self, small_logits):
+        """Test k_tail=0 matches the existing top-k objective."""
+        teacher, student = small_logits
+        k_head = 16
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=0
+        )
+        student_selected = torch.gather(student.detach(), -1, indices)
+
+        actual = subset_k2_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=0,
+            p_head=p_head,
+        )
+        expected = subset_kl_from_gathered(student_selected, teacher_log_probs)
+
+        assert torch.allclose(actual, expected)
+
+
 class TestComputeSubsetKL:
     """Tests for compute_subset_kl convenience function."""
     
@@ -212,6 +418,503 @@ class TestComputeSubsetKL:
         assert torch.allclose(expected, actual)
 
 
+class TestComputeSubsetK2KL:
+    """Tests for compute_subset_k2_kl convenience function."""
+
+    def test_matches_manual_with_seeded_generator(self, small_logits):
+        """Test convenience path matches manual selection with the same seed."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        manual_generator = torch.Generator().manual_seed(123)
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=manual_generator,
+        )
+        student_selected = torch.gather(student.detach(), -1, indices)
+        student_log_normalizer = torch.logsumexp(student.detach().float(), dim=-1)
+        expected = subset_k2_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        actual_generator = torch.Generator().manual_seed(123)
+        actual = compute_subset_k2_kl(
+            student.detach(),
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=actual_generator,
+        )
+
+        assert torch.allclose(expected, actual)
+
+
+class TestSubsetK3KLFromGathered:
+    """Tests for the subset K3 tail objective."""
+
+    def test_basic(self, small_logits):
+        """Test basic computation."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        loss = subset_k3_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        assert loss.dim() == 0
+        assert loss.item() >= 0
+        assert torch.isfinite(loss)
+
+    def test_gradient_flow(self, small_logits):
+        """Test gradients flow through selected student logits."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+        loss = subset_k3_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+        loss.backward()
+
+        assert student.grad is not None
+        assert torch.isfinite(student.grad).all()
+
+    def test_requires_full_student_normalizer_for_tail(self, small_logits):
+        """Test the K3 tail cannot silently use selected-subset Q."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+
+        with pytest.raises(ValueError, match="student_log_normalizer is required"):
+            subset_k3_kl_from_gathered(
+                student_selected,
+                teacher_log_probs,
+                k_head=k_head,
+                k_tail=k_tail,
+                p_head=p_head,
+            )
+
+    def test_tail_matches_full_vocab_k3_formula(self, small_logits):
+        """Test tail uses Schulman's K3 formula with full log Q."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        generator = torch.Generator().manual_seed(123)
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail, generator=generator
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        actual = subset_k3_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            reduction="none",
+        )
+
+        head_idx = indices[..., :k_head]
+        tail_idx = indices[..., k_head:]
+        teacher_head = torch.gather(teacher, -1, head_idx)
+        student_head = torch.gather(student, -1, head_idx)
+        teacher_head_log_probs = F.log_softmax(teacher_head, dim=-1)
+        student_head_log_probs = F.log_softmax(student_head, dim=-1)
+        head = (
+            teacher_head_log_probs.exp()
+            * (teacher_head_log_probs - student_head_log_probs)
+        ).sum(dim=-1)
+
+        teacher_full_log_probs = F.log_softmax(teacher.float(), dim=-1)
+        student_full_log_probs = F.log_softmax(student.float(), dim=-1)
+        teacher_tail = torch.gather(teacher_full_log_probs, -1, tail_idx)
+        student_tail = torch.gather(student_full_log_probs, -1, tail_idx)
+        log_ratio = student_tail - teacher_tail
+        expected = head + (1.0 - p_head.detach()) * (
+            torch.expm1(log_ratio) - log_ratio
+        ).sum(dim=-1) / k_tail
+
+        assert torch.allclose(actual, expected)
+
+    def test_no_tail_matches_topk(self, small_logits):
+        """Test k_tail=0 matches the existing top-k objective."""
+        teacher, student = small_logits
+        k_head = 16
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=0
+        )
+        student_selected = torch.gather(student.detach(), -1, indices)
+
+        actual = subset_k3_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=0,
+            p_head=p_head,
+        )
+        expected = subset_kl_from_gathered(student_selected, teacher_log_probs)
+
+        assert torch.allclose(actual, expected)
+
+
+class TestComputeSubsetK3KL:
+    """Tests for compute_subset_k3_kl convenience function."""
+
+    def test_matches_manual_with_seeded_generator(self, small_logits):
+        """Test convenience path matches manual selection with the same seed."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        manual_generator = torch.Generator().manual_seed(123)
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=manual_generator,
+        )
+        student_selected = torch.gather(student.detach(), -1, indices)
+        student_log_normalizer = torch.logsumexp(student.detach().float(), dim=-1)
+        expected = subset_k3_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        actual_generator = torch.Generator().manual_seed(123)
+        actual = compute_subset_k3_kl(
+            student.detach(),
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=actual_generator,
+        )
+
+        assert torch.allclose(expected, actual)
+
+
+class TestSubsetMonteCarloKLFromGathered:
+    """Tests for the exact-head plus Monte Carlo tail estimator."""
+
+    def test_matches_full_logprob_formula(self, small_logits):
+        """Test MC estimator uses full-vocabulary log P and log Q."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        generator = torch.Generator().manual_seed(123)
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail, generator=generator
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        actual = subset_mc_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            reduction="none",
+        )
+
+        teacher_full_log_probs = F.log_softmax(teacher.float(), dim=-1)
+        student_full_log_probs = F.log_softmax(student.float(), dim=-1)
+        head_idx = indices[..., :k_head]
+        tail_idx = indices[..., k_head:]
+        teacher_head = torch.gather(teacher_full_log_probs, -1, head_idx)
+        student_head = torch.gather(student_full_log_probs, -1, head_idx)
+        teacher_tail = torch.gather(teacher_full_log_probs, -1, tail_idx)
+        student_tail = torch.gather(student_full_log_probs, -1, tail_idx)
+
+        expected = (teacher_head.exp() * (teacher_head - student_head)).sum(dim=-1)
+        expected = expected + (1.0 - p_head.detach()) * (
+            teacher_tail - student_tail
+        ).sum(dim=-1) / k_tail
+
+        assert torch.allclose(actual, expected)
+
+    def test_requires_full_student_normalizer(self, small_logits):
+        """Test MC estimator cannot use subset-normalized student probabilities."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+
+        with pytest.raises(ValueError, match="student_log_normalizer is required"):
+            subset_mc_kl_from_gathered(
+                student_selected,
+                teacher_log_probs,
+                k_head=k_head,
+                k_tail=k_tail,
+                p_head=p_head,
+            )
+
+    def test_explicit_mixed_proposal_uses_unbiased_absolute_weights(self, small_logits):
+        """Test MC with explicit q uses original P_i / q_i tail weights."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        generator = torch.Generator().manual_seed(123)
+        indices, teacher_log_probs, p_head, proposal_log_probs = select_head_tail_indices(
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=generator,
+            tail_proposal="mixed",
+            return_tail_proposal_log_probs=True,
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        actual, diagnostics = subset_mc_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            tail_proposal_log_probs_selected=proposal_log_probs,
+            reduction="none",
+            return_diagnostics=True,
+        )
+
+        teacher_full_log_probs = F.log_softmax(teacher.float(), dim=-1)
+        student_full_log_probs = F.log_softmax(student.float(), dim=-1)
+        head_idx = indices[..., :k_head]
+        tail_idx = indices[..., k_head:]
+        teacher_head = torch.gather(teacher_full_log_probs, -1, head_idx)
+        student_head = torch.gather(student_full_log_probs, -1, head_idx)
+        teacher_tail = torch.gather(teacher_full_log_probs, -1, tail_idx)
+        student_tail = torch.gather(student_full_log_probs, -1, tail_idx)
+        expected = (teacher_head.exp() * (teacher_head - student_head)).sum(dim=-1)
+        weights = (teacher_tail - proposal_log_probs).exp()
+        expected = expected + (weights * (teacher_tail - student_tail)).sum(dim=-1) / k_tail
+
+        assert torch.allclose(actual, expected)
+        assert diagnostics["tail_ess_mean"] > 0
+        assert diagnostics["tail_max_weight"] > 0
+
+
+class TestSubsetHajekKLFromGathered:
+    """Tests for the exact-head plus Hajek tail estimator."""
+
+    def test_teacher_tail_proposal_matches_mc(self, small_logits):
+        """Test Hajek reduces to MC when the proposal is the teacher tail."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        generator = torch.Generator().manual_seed(123)
+
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail, generator=generator
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        mc = subset_mc_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            reduction="none",
+        )
+        hajek = subset_hajek_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            reduction="none",
+        )
+
+        assert torch.allclose(hajek, mc)
+
+    def test_accepts_explicit_tail_proposal(self, small_logits):
+        """Test explicit proposal probabilities are used for Hajek weights."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+        uniform_log_prob = -torch.log(
+            torch.tensor(float(k_tail), device=teacher.device)
+        ).item()
+        uniform_tail_log_probs = torch.full_like(
+            teacher_log_probs[..., k_head:],
+            uniform_log_prob,
+        )
+
+        loss = subset_hajek_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            tail_proposal_log_probs_selected=uniform_tail_log_probs,
+        )
+
+        assert torch.isfinite(loss)
+
+    def test_mixed_proposal_hajek_matches_manual_self_normalized_tail(self, small_logits):
+        """Test mixed q Hajek uses conditional P_tail / q weights and tail mass."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+        generator = torch.Generator().manual_seed(123)
+        indices, teacher_log_probs, p_head, proposal_log_probs = select_head_tail_indices(
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=generator,
+            tail_proposal="mixed",
+            return_tail_proposal_log_probs=True,
+        )
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+
+        actual, diagnostics = subset_hajek_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            tail_proposal_log_probs_selected=proposal_log_probs,
+            reduction="none",
+            return_diagnostics=True,
+        )
+
+        teacher_full_log_probs = F.log_softmax(teacher.float(), dim=-1)
+        student_full_log_probs = F.log_softmax(student.float(), dim=-1)
+        head_idx = indices[..., :k_head]
+        tail_idx = indices[..., k_head:]
+        teacher_head = torch.gather(teacher_full_log_probs, -1, head_idx)
+        student_head = torch.gather(student_full_log_probs, -1, head_idx)
+        teacher_tail = torch.gather(teacher_full_log_probs, -1, tail_idx)
+        student_tail = torch.gather(student_full_log_probs, -1, tail_idx)
+
+        head = (teacher_head.exp() * (teacher_head - student_head)).sum(dim=-1)
+        tail_mass = (1.0 - p_head).clamp_min(1e-12)
+        weights = (teacher_tail - tail_mass.unsqueeze(-1).log() - proposal_log_probs).exp()
+        tail = tail_mass * (weights * (teacher_tail - student_tail)).sum(dim=-1)
+        tail = tail / weights.sum(dim=-1).clamp_min(1e-12)
+
+        assert torch.allclose(actual, head + tail)
+        assert diagnostics["tail_ess_mean"] > 0
+
+
+class TestComputeSubsetMCKL:
+    """Tests for compute_subset_mc_kl convenience function."""
+
+    def test_matches_manual_with_seeded_generator(self, small_logits):
+        """Test convenience path matches manual selection with the same seed."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        manual_generator = torch.Generator().manual_seed(123)
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail, generator=manual_generator
+        )
+        student_selected = torch.gather(student.detach(), -1, indices)
+        student_log_normalizer = torch.logsumexp(student.detach().float(), dim=-1)
+        expected = subset_mc_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        actual_generator = torch.Generator().manual_seed(123)
+        actual = compute_subset_mc_kl(
+            student.detach(),
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=actual_generator,
+        )
+
+        assert torch.allclose(expected, actual)
+
+
+class TestComputeSubsetHajekKL:
+    """Tests for compute_subset_hajek_kl convenience function."""
+
+    def test_matches_manual_with_seeded_generator(self, small_logits):
+        """Test convenience path matches manual selection with the same seed."""
+        teacher, student = small_logits
+        k_head, k_tail = 16, 8
+
+        manual_generator = torch.Generator().manual_seed(123)
+        indices, teacher_log_probs, p_head = select_head_tail_indices(
+            teacher, k_head=k_head, k_tail=k_tail, generator=manual_generator
+        )
+        student_selected = torch.gather(student.detach(), -1, indices)
+        student_log_normalizer = torch.logsumexp(student.detach().float(), dim=-1)
+        expected = subset_hajek_kl_from_gathered(
+            student_selected,
+            teacher_log_probs,
+            k_head=k_head,
+            k_tail=k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        actual_generator = torch.Generator().manual_seed(123)
+        actual = compute_subset_hajek_kl(
+            student.detach(),
+            teacher,
+            k_head=k_head,
+            k_tail=k_tail,
+            generator=actual_generator,
+        )
+
+        assert torch.allclose(expected, actual)
+
+
 class TestFullKL:
     """Tests for full_kl baseline."""
     
@@ -223,7 +926,29 @@ class TestFullKL:
         
         assert loss.dim() == 0
         assert loss.item() >= 0
-        assert torch.isfinite(loss)
+
+
+class TestTailProposalExperiments:
+    """Tests for repeated-trial tail proposal diagnostics."""
+
+    def test_evaluate_tail_proposal_grid_smoke(self, small_logits):
+        teacher, student = small_logits
+
+        rows = evaluate_tail_proposal_grid(
+            student.detach(),
+            teacher,
+            k_head=16,
+            k_tail=4,
+            alpha_values=(0.8,),
+            tau_values=(0.7,),
+            sample_counts=(4,),
+            num_trials=2,
+        )
+
+        names = {row["name"] for row in rows}
+        assert {"topk_only", "target", "tempered_tau0.7", "mixed_alpha0.8_tau0.7"} <= names
+        assert all("mean_estimate" in row for row in rows)
+        assert all("mse" in row for row in rows)
     
     def test_subset_approaches_full(self, logits):
         """Test subset KL approaches full as k increases."""
@@ -318,14 +1043,142 @@ class TestKLDivergenceLoss:
         assert torch.allclose(loss_full, loss_chunked, rtol=1e-4)
 
 
-class TestHajekKLLoss:
-    """Tests for HajekKLLoss class."""
+class TestSubsetK2KLLoss:
+    """Tests for SubsetK2KLLoss class."""
+
+    def test_forward_gathered(self, small_logits):
+        """Test gathered path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetK2KLLoss(k_head=16, k_tail=8)
+        indices, teacher_log_probs, p_head = loss_fn.select_indices(teacher)
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+        loss = loss_fn.forward_gathered(
+            student_selected,
+            teacher_log_probs,
+            p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        assert torch.isfinite(loss)
+        assert loss_fn.last_indices is not None
+        assert loss_fn.last_p_head is not None
+
+    def test_forward_convenience(self, small_logits):
+        """Test full-logit convenience path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetK2KLLoss(k_head=16, k_tail=8)
+        loss = loss_fn(student, teacher)
+
+        assert torch.isfinite(loss)
+
+
+class TestSubsetK3KLLoss:
+    """Tests for SubsetK3KLLoss class."""
+
+    def test_forward_gathered(self, small_logits):
+        """Test gathered path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetK3KLLoss(k_head=16, k_tail=8)
+        indices, teacher_log_probs, p_head = loss_fn.select_indices(teacher)
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+        loss = loss_fn.forward_gathered(
+            student_selected,
+            teacher_log_probs,
+            p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        assert torch.isfinite(loss)
+        assert loss_fn.last_indices is not None
+        assert loss_fn.last_p_head is not None
+
+    def test_forward_convenience(self, small_logits):
+        """Test full-logit convenience path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetK3KLLoss(k_head=16, k_tail=8)
+        loss = loss_fn(student, teacher)
+
+        assert torch.isfinite(loss)
+
+
+class TestSubsetMonteCarloKLLoss:
+    """Tests for SubsetMonteCarloKLLoss class."""
+
+    def test_forward_gathered(self, small_logits):
+        """Test gathered path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetMonteCarloKLLoss(k_head=16, k_tail=8)
+        indices, teacher_log_probs, p_head = loss_fn.select_indices(teacher)
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+        loss = loss_fn.forward_gathered(
+            student_selected,
+            teacher_log_probs,
+            p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        assert torch.isfinite(loss)
+        assert loss_fn.last_indices is not None
+        assert loss_fn.last_p_head is not None
+
+    def test_forward_convenience(self, small_logits):
+        """Test full-logit convenience path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetMonteCarloKLLoss(k_head=16, k_tail=8)
+        loss = loss_fn(student, teacher)
+
+        assert torch.isfinite(loss)
+
+
+class TestSubsetHajekKLLoss:
+    """Tests for SubsetHajekKLLoss class."""
+
+    def test_forward_gathered(self, small_logits):
+        """Test gathered path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetHajekKLLoss(k_head=16, k_tail=8)
+        indices, teacher_log_probs, p_head = loss_fn.select_indices(teacher)
+        student_selected = torch.gather(student, -1, indices)
+        student_log_normalizer = torch.logsumexp(student.float(), dim=-1)
+        loss = loss_fn.forward_gathered(
+            student_selected,
+            teacher_log_probs,
+            p_head,
+            student_log_normalizer=student_log_normalizer,
+        )
+
+        assert torch.isfinite(loss)
+        assert loss_fn.last_indices is not None
+        assert loss_fn.last_p_head is not None
+
+    def test_forward_convenience(self, small_logits):
+        """Test full-logit convenience path."""
+        teacher, student = small_logits
+
+        loss_fn = SubsetHajekKLLoss(k_head=16, k_tail=8)
+        loss = loss_fn(student, teacher)
+
+        assert torch.isfinite(loss)
+
+
+class TestFrankensteinKLLoss:
+    """Tests for FrankensteinKLLoss class."""
     
     def test_basic(self, small_logits):
         """Test basic usage."""
         teacher, student = small_logits
         
-        loss_fn = HajekKLLoss(k_head=16, k_tail=8)
+        loss_fn = FrankensteinKLLoss(k_head=16, k_tail=8)
         loss = loss_fn(student, teacher)
         
         assert torch.isfinite(loss)
@@ -400,8 +1253,8 @@ class TestPPSSampling:
         assert (inc_probs <= 1).all()
 
 
-class TestHajekEstimate:
-    """Tests for Hajek estimator."""
+class TestFrankensteinEstimate:
+    """Tests for Frankenstein estimator."""
     
     def test_basic(self):
         """Test basic estimation."""
@@ -419,7 +1272,7 @@ class TestHajekEstimate:
         teacher_sel = torch.gather(log_probs, -1, indices)
         student_sel = torch.gather(student, -1, indices)
         
-        kl, var = hajek_kl_estimate(
+        kl, var = frankenstein_kl_estimate(
             teacher_sel, student_sel, indices, inc_probs, mask
         )
         

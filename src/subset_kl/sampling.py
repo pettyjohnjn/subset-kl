@@ -3,7 +3,7 @@
 Sampling utilities for subset KL divergence estimation.
 
 Implements Probability Proportional to Size (PPS) sampling and
-Hajek (self-normalized) importance sampling estimators for
+Frankenstein (self-normalized) importance sampling estimators for
 unbiased estimation of full-vocabulary KL divergence.
 
 For most use cases, the simple top-k approach via
@@ -168,7 +168,7 @@ def pps_sample_indices_batched(
     return indices, inclusion_probs, mask, diagnostics
 
 
-def hajek_kl_estimate(
+def frankenstein_kl_estimate(
     teacher_log_probs: torch.Tensor,
     student_logits: torch.Tensor,
     indices: Optional[torch.Tensor],
@@ -177,7 +177,7 @@ def hajek_kl_estimate(
     weight_clip: float = 50.0,
 ) -> Tuple[torch.Tensor, float]:
     """
-    Hajek (self-normalized) importance sampling estimator for KL divergence.
+    Frankenstein (self-normalized) importance sampling estimator for KL divergence.
     
     Provides an approximately unbiased estimate of the full-vocabulary
     KL divergence using only a subset of vocabulary indices.
@@ -222,7 +222,7 @@ def hajek_kl_estimate(
     # Weighted KL terms
     kl_terms = teacher_probs * (teacher_log_probs - student_log_probs) * weights
     
-    # Self-normalize (Hajek estimator)
+    # Self-normalize (Frankenstein estimator)
     numerator = (kl_terms * mask.float()).sum(dim=-1)
     denominator = (teacher_probs * weights * mask.float()).sum(dim=-1).clamp_min(1e-8)
     

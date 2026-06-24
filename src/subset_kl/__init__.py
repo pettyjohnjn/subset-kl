@@ -59,15 +59,25 @@ __version__ = "0.1.0"
 # Core Functional Interface (RECOMMENDED)
 # =============================================================================
 from .core import (
+    TailProposalType,
     # Index selection
     select_topk_indices,
+    select_head_tail_indices,
     select_indices_with_sampling,
     select_indices_with_importance_sampling,
     # KL computation on pre-gathered tensors
     subset_kl_from_gathered,
+    subset_k2_kl_from_gathered,
+    subset_k3_kl_from_gathered,
+    subset_mc_kl_from_gathered,
+    subset_hajek_kl_from_gathered,
     subset_kl_from_gathered_with_weights,
     # Convenience (when you have full logits)
     compute_subset_kl,
+    compute_subset_k2_kl,
+    compute_subset_k3_kl,
+    compute_subset_mc_kl,
+    compute_subset_hajek_kl,
     full_kl,
 )
 
@@ -76,8 +86,12 @@ from .core import (
 # =============================================================================
 from .losses import (
     SubsetKLLoss,
+    SubsetK2KLLoss,
+    SubsetK3KLLoss,
+    SubsetMonteCarloKLLoss,
+    SubsetHajekKLLoss,
     KLDivergenceLoss,
-    HajekKLLoss,
+    FrankensteinKLLoss,
     ImportanceKLLoss,
 )
 
@@ -95,25 +109,40 @@ from .base import (
 # =============================================================================
 from .sampling import (
     pps_sample_indices_batched,
-    hajek_kl_estimate,
+    frankenstein_kl_estimate,
     SamplingDiagnostics,
 )
+from .experiments import evaluate_tail_proposal_grid
 
 __all__ = [
     # Version
     "__version__",
     # Core functional (recommended)
     "select_topk_indices",
+    "TailProposalType",
+    "select_head_tail_indices",
     "select_indices_with_sampling",
     "select_indices_with_importance_sampling",
     "subset_kl_from_gathered",
+    "subset_k2_kl_from_gathered",
+    "subset_k3_kl_from_gathered",
+    "subset_mc_kl_from_gathered",
+    "subset_hajek_kl_from_gathered",
     "subset_kl_from_gathered_with_weights",
     "compute_subset_kl",
+    "compute_subset_k2_kl",
+    "compute_subset_k3_kl",
+    "compute_subset_mc_kl",
+    "compute_subset_hajek_kl",
     "full_kl",
     # Class-based
     "SubsetKLLoss",
+    "SubsetK2KLLoss",
+    "SubsetK3KLLoss",
+    "SubsetMonteCarloKLLoss",
+    "SubsetHajekKLLoss",
     "KLDivergenceLoss",
-    "HajekKLLoss",
+    "FrankensteinKLLoss",
     "ImportanceKLLoss",
     # Base
     "BaseLoss",
@@ -121,6 +150,7 @@ __all__ = [
     "apply_reduction",
     # Sampling
     "pps_sample_indices_batched",
-    "hajek_kl_estimate",
+    "frankenstein_kl_estimate",
     "SamplingDiagnostics",
+    "evaluate_tail_proposal_grid",
 ]

@@ -15,8 +15,14 @@ import torch.nn.functional as F
 
 from .base import BaseLoss, ReductionType
 from .core import (
+    TailProposalType,
+    select_head_tail_indices,
     select_topk_indices,
+    subset_hajek_kl_from_gathered,
+    subset_k2_kl_from_gathered,
+    subset_k3_kl_from_gathered,
     subset_kl_from_gathered,
+    subset_mc_kl_from_gathered,
     full_kl,
 )
 
@@ -254,9 +260,463 @@ class KLDivergenceLoss(BaseLoss):
         return f"KLDivergenceLoss({', '.join(parts)})"
 
 
-class HajekKLLoss(BaseLoss):
+class SubsetK2KLLoss(BaseLoss):
     """
-    Importance-weighted KL loss using Hajek estimator.
+    Top-k head KL with a Monte Carlo K2 penalty on the teacher tail.
+
+    This follows the subset KL objective:
+
+        KL_head + (1 - sg(P_head)) / k_tail * sum_i (log P(t_i) - log Q(t_i))^2
+
+    The efficient path is ``select_indices()`` followed by a model/lens forward
+    on those indices and then ``forward_gathered()``. For ``k_tail > 0``,
+    ``forward_gathered()`` also needs the full-vocabulary student log
+    normalizer so the tail term uses the true ``log Q(t_i)``.
+    """
+
+    def __init__(
+        self,
+        k_head: int = 256,
+        k_tail: int = 256,
+        tail_proposal: TailProposalType = "target",
+        tail_proposal_alpha: float = 0.8,
+        tail_proposal_tau: float = 0.7,
+        reduction: ReductionType = "mean",
+    ) -> None:
+        super().__init__(reduction=reduction)
+        self.k_head = k_head
+        self.k_tail = k_tail
+        self.tail_proposal = tail_proposal
+        self.tail_proposal_alpha = tail_proposal_alpha
+        self.tail_proposal_tau = tail_proposal_tau
+        self._last_indices: Optional[torch.Tensor] = None
+        self._last_p_head: Optional[torch.Tensor] = None
+        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+
+    def select_indices(
+        self,
+        teacher_logits: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Select top-k head plus sampled tail indices.
+
+        Returns selected indices, full teacher log-probabilities at those
+        indices, and the full teacher probability mass of the head.
+        """
+        indices, teacher_log_probs_selected, p_head = select_head_tail_indices(
+            teacher_logits,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            generator=generator,
+        )
+        self._last_indices = indices
+        self._last_p_head = p_head
+        return indices, teacher_log_probs_selected, p_head
+
+    def forward_gathered(
+        self,
+        student_logits_selected: torch.Tensor,
+        teacher_log_probs_selected: torch.Tensor,
+        p_head: Optional[torch.Tensor] = None,
+        student_log_normalizer: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute subset K2 KL from pre-gathered selected logits."""
+        return subset_k2_kl_from_gathered(
+            student_logits_selected,
+            teacher_log_probs_selected,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            attention_mask=attention_mask,
+            reduction=self.reduction,
+        )
+
+    def forward(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute subset K2 KL from full logits as a convenience path."""
+        indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
+        student_selected = torch.gather(student_logits, -1, indices)
+        student_log_normalizer = torch.logsumexp(student_logits.float(), dim=-1)
+        return self.forward_gathered(
+            student_selected,
+            teacher_log_probs_selected,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            attention_mask=attention_mask,
+        )
+
+    @property
+    def last_indices(self) -> Optional[torch.Tensor]:
+        """Last selected indices."""
+        return self._last_indices
+
+    @property
+    def last_p_head(self) -> Optional[torch.Tensor]:
+        """Last teacher head mass."""
+        return self._last_p_head
+
+    def __repr__(self) -> str:
+        return (
+            f"SubsetK2KLLoss(k_head={self.k_head}, k_tail={self.k_tail}, "
+            f"reduction={self.reduction!r})"
+        )
+
+
+class SubsetK3KLLoss(BaseLoss):
+    """
+    Top-k head KL with Schulman's K3 estimator on the teacher tail.
+
+    This follows the subset KL objective:
+
+        KL_head + (1 - sg(P_head)) / k_tail
+        * sum_i (exp(log Q(t_i) - log P(t_i)) - 1 - (log Q(t_i) - log P(t_i)))
+
+    The efficient path is ``select_indices()`` followed by a model/lens forward
+    on those indices and then ``forward_gathered()``. For ``k_tail > 0``,
+    ``forward_gathered()`` also needs the full-vocabulary student log
+    normalizer so the tail term uses the true ``log Q(t_i)``.
+    """
+
+    def __init__(
+        self,
+        k_head: int = 256,
+        k_tail: int = 256,
+        tail_proposal: TailProposalType = "target",
+        tail_proposal_alpha: float = 0.8,
+        tail_proposal_tau: float = 0.7,
+        reduction: ReductionType = "mean",
+    ) -> None:
+        super().__init__(reduction=reduction)
+        self.k_head = k_head
+        self.k_tail = k_tail
+        self.tail_proposal = tail_proposal
+        self.tail_proposal_alpha = tail_proposal_alpha
+        self.tail_proposal_tau = tail_proposal_tau
+        self._last_indices: Optional[torch.Tensor] = None
+        self._last_p_head: Optional[torch.Tensor] = None
+        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+
+    def select_indices(
+        self,
+        teacher_logits: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Select top-k head plus sampled tail indices.
+
+        Returns selected indices, full teacher log-probabilities at those
+        indices, and the full teacher probability mass of the head.
+        """
+        indices, teacher_log_probs_selected, p_head = select_head_tail_indices(
+            teacher_logits,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            generator=generator,
+        )
+        self._last_indices = indices
+        self._last_p_head = p_head
+        return indices, teacher_log_probs_selected, p_head
+
+    def forward_gathered(
+        self,
+        student_logits_selected: torch.Tensor,
+        teacher_log_probs_selected: torch.Tensor,
+        p_head: Optional[torch.Tensor] = None,
+        student_log_normalizer: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute subset K3 KL from pre-gathered selected logits."""
+        return subset_k3_kl_from_gathered(
+            student_logits_selected,
+            teacher_log_probs_selected,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            attention_mask=attention_mask,
+            reduction=self.reduction,
+        )
+
+    def forward(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute subset K3 KL from full logits as a convenience path."""
+        indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
+        student_selected = torch.gather(student_logits, -1, indices)
+        student_log_normalizer = torch.logsumexp(student_logits.float(), dim=-1)
+        return self.forward_gathered(
+            student_selected,
+            teacher_log_probs_selected,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            attention_mask=attention_mask,
+        )
+
+    @property
+    def last_indices(self) -> Optional[torch.Tensor]:
+        """Last selected indices."""
+        return self._last_indices
+
+    @property
+    def last_p_head(self) -> Optional[torch.Tensor]:
+        """Last teacher head mass."""
+        return self._last_p_head
+
+    def __repr__(self) -> str:
+        return (
+            f"SubsetK3KLLoss(k_head={self.k_head}, k_tail={self.k_tail}, "
+            f"reduction={self.reduction!r})"
+        )
+
+
+class SubsetMonteCarloKLLoss(BaseLoss):
+    """
+    Exact top-k head KL with a Monte Carlo estimate of the teacher-tail KL.
+
+    The efficient path is ``select_indices()`` followed by a model/lens forward
+    on those indices and then ``forward_gathered()``. The gathered path requires
+    the full-vocabulary student log normalizer so both head and tail use the
+    true full-vocabulary ``log Q``.
+    """
+
+    def __init__(
+        self,
+        k_head: int = 256,
+        k_tail: int = 256,
+        tail_proposal: TailProposalType = "target",
+        tail_proposal_alpha: float = 0.8,
+        tail_proposal_tau: float = 0.7,
+        reduction: ReductionType = "mean",
+    ) -> None:
+        super().__init__(reduction=reduction)
+        self.k_head = k_head
+        self.k_tail = k_tail
+        self.tail_proposal = tail_proposal
+        self.tail_proposal_alpha = tail_proposal_alpha
+        self.tail_proposal_tau = tail_proposal_tau
+        self._last_indices: Optional[torch.Tensor] = None
+        self._last_p_head: Optional[torch.Tensor] = None
+        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+
+    def select_indices(
+        self,
+        teacher_logits: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Select top-k head plus sampled tail indices."""
+        selected = select_head_tail_indices(
+            teacher_logits,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            generator=generator,
+            tail_proposal=self.tail_proposal,
+            tail_proposal_alpha=self.tail_proposal_alpha,
+            tail_proposal_tau=self.tail_proposal_tau,
+            return_tail_proposal_log_probs=self.tail_proposal not in {"target", "teacher"},
+        )
+        if self.tail_proposal not in {"target", "teacher"}:
+            indices, teacher_log_probs_selected, p_head, tail_proposal_log_probs = selected
+        else:
+            indices, teacher_log_probs_selected, p_head = selected
+            tail_proposal_log_probs = None
+        self._last_indices = indices
+        self._last_p_head = p_head
+        self._last_tail_proposal_log_probs = tail_proposal_log_probs
+        return indices, teacher_log_probs_selected, p_head
+
+    def forward_gathered(
+        self,
+        student_logits_selected: torch.Tensor,
+        teacher_log_probs_selected: torch.Tensor,
+        p_head: Optional[torch.Tensor] = None,
+        student_log_normalizer: Optional[torch.Tensor] = None,
+        tail_proposal_log_probs_selected: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute Monte Carlo KL from pre-gathered selected logits."""
+        return subset_mc_kl_from_gathered(
+            student_logits_selected,
+            teacher_log_probs_selected,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            tail_proposal_log_probs_selected=tail_proposal_log_probs_selected,
+            attention_mask=attention_mask,
+            reduction=self.reduction,
+        )
+
+    def forward(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute Monte Carlo KL from full logits as a convenience path."""
+        indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
+        student_selected = torch.gather(student_logits, -1, indices)
+        student_log_normalizer = torch.logsumexp(student_logits.float(), dim=-1)
+        return self.forward_gathered(
+            student_selected,
+            teacher_log_probs_selected,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            tail_proposal_log_probs_selected=self._last_tail_proposal_log_probs,
+            attention_mask=attention_mask,
+        )
+
+    @property
+    def last_indices(self) -> Optional[torch.Tensor]:
+        """Last selected indices."""
+        return self._last_indices
+
+    @property
+    def last_p_head(self) -> Optional[torch.Tensor]:
+        """Last teacher head mass."""
+        return self._last_p_head
+
+    @property
+    def last_tail_proposal_log_probs(self) -> Optional[torch.Tensor]:
+        """Last selected tail proposal log-probabilities."""
+        return self._last_tail_proposal_log_probs
+
+    def __repr__(self) -> str:
+        return (
+            f"SubsetMonteCarloKLLoss(k_head={self.k_head}, k_tail={self.k_tail}, "
+            f"tail_proposal={self.tail_proposal!r}, reduction={self.reduction!r})"
+        )
+
+
+class SubsetHajekKLLoss(BaseLoss):
+    """
+    Exact top-k head KL with a self-normalized Hajek teacher-tail KL estimate.
+
+    With ``select_indices()``, tail samples are drawn from the teacher tail, so
+    the Hajek tail estimate reduces to the Monte Carlo tail estimate. Use the
+    functional gathered API directly when supplying a different tail proposal.
+    """
+
+    def __init__(
+        self,
+        k_head: int = 256,
+        k_tail: int = 256,
+        tail_proposal: TailProposalType = "target",
+        tail_proposal_alpha: float = 0.8,
+        tail_proposal_tau: float = 0.7,
+        reduction: ReductionType = "mean",
+    ) -> None:
+        super().__init__(reduction=reduction)
+        self.k_head = k_head
+        self.k_tail = k_tail
+        self.tail_proposal = tail_proposal
+        self.tail_proposal_alpha = tail_proposal_alpha
+        self.tail_proposal_tau = tail_proposal_tau
+        self._last_indices: Optional[torch.Tensor] = None
+        self._last_p_head: Optional[torch.Tensor] = None
+        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+
+    def select_indices(
+        self,
+        teacher_logits: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Select top-k head plus sampled tail indices."""
+        selected = select_head_tail_indices(
+            teacher_logits,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            generator=generator,
+            tail_proposal=self.tail_proposal,
+            tail_proposal_alpha=self.tail_proposal_alpha,
+            tail_proposal_tau=self.tail_proposal_tau,
+            return_tail_proposal_log_probs=self.tail_proposal not in {"target", "teacher"},
+        )
+        if self.tail_proposal not in {"target", "teacher"}:
+            indices, teacher_log_probs_selected, p_head, tail_proposal_log_probs = selected
+        else:
+            indices, teacher_log_probs_selected, p_head = selected
+            tail_proposal_log_probs = None
+        self._last_indices = indices
+        self._last_p_head = p_head
+        self._last_tail_proposal_log_probs = tail_proposal_log_probs
+        return indices, teacher_log_probs_selected, p_head
+
+    def forward_gathered(
+        self,
+        student_logits_selected: torch.Tensor,
+        teacher_log_probs_selected: torch.Tensor,
+        p_head: Optional[torch.Tensor] = None,
+        student_log_normalizer: Optional[torch.Tensor] = None,
+        tail_proposal_log_probs_selected: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute Hajek KL from pre-gathered selected logits."""
+        return subset_hajek_kl_from_gathered(
+            student_logits_selected,
+            teacher_log_probs_selected,
+            k_head=self.k_head,
+            k_tail=self.k_tail,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            tail_proposal_log_probs_selected=tail_proposal_log_probs_selected,
+            attention_mask=attention_mask,
+            reduction=self.reduction,
+        )
+
+    def forward(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute Hajek KL from full logits as a convenience path."""
+        indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
+        student_selected = torch.gather(student_logits, -1, indices)
+        student_log_normalizer = torch.logsumexp(student_logits.float(), dim=-1)
+        return self.forward_gathered(
+            student_selected,
+            teacher_log_probs_selected,
+            p_head=p_head,
+            student_log_normalizer=student_log_normalizer,
+            tail_proposal_log_probs_selected=self._last_tail_proposal_log_probs,
+            attention_mask=attention_mask,
+        )
+
+    @property
+    def last_indices(self) -> Optional[torch.Tensor]:
+        """Last selected indices."""
+        return self._last_indices
+
+    @property
+    def last_p_head(self) -> Optional[torch.Tensor]:
+        """Last teacher head mass."""
+        return self._last_p_head
+
+    @property
+    def last_tail_proposal_log_probs(self) -> Optional[torch.Tensor]:
+        """Last selected tail proposal log-probabilities."""
+        return self._last_tail_proposal_log_probs
+
+    def __repr__(self) -> str:
+        return (
+            f"SubsetHajekKLLoss(k_head={self.k_head}, k_tail={self.k_tail}, "
+            f"tail_proposal={self.tail_proposal!r}, reduction={self.reduction!r})"
+        )
+
+
+class FrankensteinKLLoss(BaseLoss):
+    """
+    Importance-weighted KL loss using Frankenstein estimator.
     
     This provides an unbiased estimator but has higher variance.
     For most cases, `SubsetKLLoss` (pure top-k) is preferred.
@@ -300,7 +760,7 @@ class HajekKLLoss(BaseLoss):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute importance-weighted KL."""
-        from .sampling import pps_sample_indices_batched, hajek_kl_estimate
+        from .sampling import pps_sample_indices_batched, frankenstein_kl_estimate
         
         B, T, V = student_logits.shape
         
@@ -323,8 +783,8 @@ class HajekKLLoss(BaseLoss):
         teacher_sel = torch.gather(teacher_log_probs, -1, indices)
         student_sel = torch.gather(student_flat, -1, indices)
         
-        # Hajek estimator
-        kl_flat, variance_proxy = hajek_kl_estimate(
+        # Frankenstein estimator
+        kl_flat, variance_proxy = frankenstein_kl_estimate(
             teacher_sel, student_sel, indices, inc_probs, mask, self.weight_clip
         )
         self._last_variance_proxy = variance_proxy
@@ -344,16 +804,16 @@ class HajekKLLoss(BaseLoss):
 
     def __repr__(self) -> str:
         return (
-            f"HajekKLLoss(k_head={self.k_head}, k_tail={self.k_tail}, "
+            f"FrankensteinKLLoss(k_head={self.k_head}, k_tail={self.k_tail}, "
             f"reduction={self.reduction!r})"
         )
 
 
-class ImportanceKLLoss(HajekKLLoss):
+class ImportanceKLLoss(FrankensteinKLLoss):
     """
     Pure importance-sampling KL loss (no deterministic head).
     
-    This is a convenience wrapper around HajekKLLoss with k_head=0.
+    This is a convenience wrapper around FrankensteinKLLoss with k_head=0.
     """
 
     def __init__(
