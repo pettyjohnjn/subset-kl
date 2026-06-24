@@ -56,9 +56,6 @@ For V=128k vocabulary, B=2, T=1024:
 __version__ = "0.1.0"
 
 # =============================================================================
-# Core Functional Interface (RECOMMENDED)
-# =============================================================================
-# =============================================================================
 # Base Classes and Types
 # =============================================================================
 from .base import (
@@ -66,51 +63,31 @@ from .base import (
     ReductionType,
     apply_reduction,
 )
+
+# =============================================================================
+# Core Functional Interface (RECOMMENDED)
+# =============================================================================
 from .core import (
     TailProposalType,
-    compute_subset_hajek_kl,
-    compute_subset_k2_kl,
-    compute_subset_k3_kl,
     # Convenience (when you have full logits)
     compute_subset_kl,
     compute_subset_mc_kl,
     full_kl,
-    select_head_tail_indices,
-    select_indices_with_importance_sampling,
-    select_indices_with_sampling,
     # Index selection
+    select_head_tail_indices,
     select_topk_indices,
-    subset_hajek_kl_from_gathered,
-    subset_k2_kl_from_gathered,
-    subset_k3_kl_from_gathered,
     # KL computation on pre-gathered tensors
     subset_kl_from_gathered,
-    subset_kl_from_gathered_with_weights,
     subset_mc_kl_from_gathered,
 )
-from .experiments import evaluate_tail_proposal_grid
 
 # =============================================================================
 # Class-based Interface
 # =============================================================================
 from .losses import (
-    FrankensteinKLLoss,
-    ImportanceKLLoss,
     KLDivergenceLoss,
-    SubsetHajekKLLoss,
-    SubsetK2KLLoss,
-    SubsetK3KLLoss,
     SubsetKLLoss,
     SubsetMonteCarloKLLoss,
-)
-
-# =============================================================================
-# Sampling Utilities (Advanced)
-# =============================================================================
-from .sampling import (
-    SamplingDiagnostics,
-    frankenstein_kl_estimate,
-    pps_sample_indices_batched,
 )
 
 __all__ = [
@@ -120,36 +97,17 @@ __all__ = [
     "select_topk_indices",
     "TailProposalType",
     "select_head_tail_indices",
-    "select_indices_with_sampling",
-    "select_indices_with_importance_sampling",
     "subset_kl_from_gathered",
-    "subset_k2_kl_from_gathered",
-    "subset_k3_kl_from_gathered",
     "subset_mc_kl_from_gathered",
-    "subset_hajek_kl_from_gathered",
-    "subset_kl_from_gathered_with_weights",
     "compute_subset_kl",
-    "compute_subset_k2_kl",
-    "compute_subset_k3_kl",
     "compute_subset_mc_kl",
-    "compute_subset_hajek_kl",
     "full_kl",
     # Class-based
     "SubsetKLLoss",
-    "SubsetK2KLLoss",
-    "SubsetK3KLLoss",
     "SubsetMonteCarloKLLoss",
-    "SubsetHajekKLLoss",
     "KLDivergenceLoss",
-    "FrankensteinKLLoss",
-    "ImportanceKLLoss",
     # Base
     "BaseLoss",
     "ReductionType",
     "apply_reduction",
-    # Sampling
-    "pps_sample_indices_batched",
-    "frankenstein_kl_estimate",
-    "SamplingDiagnostics",
-    "evaluate_tail_proposal_grid",
 ]
