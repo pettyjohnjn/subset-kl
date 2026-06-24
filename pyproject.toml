@@ -75,7 +75,10 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
+# E501: line length handled separately.
+# N806/N812: this is math-heavy code; allow conventional ML notation
+# (uppercase tensor dims like B, T, V, K and `import ... as F`).
+ignore = ["E501", "N806", "N812"]
 
 [tool.mypy]
 python_version = "3.9"

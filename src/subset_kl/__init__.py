@@ -20,14 +20,14 @@ Your model/lens is responsible for:
 Workflow for Maximum Efficiency
 -------------------------------
 >>> from subset_kl import select_topk_indices, subset_kl_from_gathered
->>> 
+>>>
 >>> # Step 1: Select indices from teacher (this package)
 >>> indices, teacher_k = select_topk_indices(teacher_logits, k=256)
->>> 
+>>>
 >>> # Step 2: Compute student logits ONLY for those indices (YOUR model)
 >>> # This is where you use indexed_logits or your lens's vocab_indices param
 >>> student_k = your_lens.forward(hidden, vocab_indices=indices).logits
->>> 
+>>>
 >>> # Step 3: Compute KL on the subsets (this package)
 >>> loss = subset_kl_from_gathered(student_k, teacher_k, attention_mask)
 
@@ -36,7 +36,7 @@ This avoids materializing full [B, T, V] student logits.
 Quick Start (when you have full logits)
 ---------------------------------------
 >>> from subset_kl import SubsetKLLoss
->>> 
+>>>
 >>> loss_fn = SubsetKLLoss(k=256)
 >>> loss = loss_fn(student_logits, teacher_logits)  # Requires full logits
 
@@ -58,43 +58,6 @@ __version__ = "0.1.0"
 # =============================================================================
 # Core Functional Interface (RECOMMENDED)
 # =============================================================================
-from .core import (
-    TailProposalType,
-    # Index selection
-    select_topk_indices,
-    select_head_tail_indices,
-    select_indices_with_sampling,
-    select_indices_with_importance_sampling,
-    # KL computation on pre-gathered tensors
-    subset_kl_from_gathered,
-    subset_k2_kl_from_gathered,
-    subset_k3_kl_from_gathered,
-    subset_mc_kl_from_gathered,
-    subset_hajek_kl_from_gathered,
-    subset_kl_from_gathered_with_weights,
-    # Convenience (when you have full logits)
-    compute_subset_kl,
-    compute_subset_k2_kl,
-    compute_subset_k3_kl,
-    compute_subset_mc_kl,
-    compute_subset_hajek_kl,
-    full_kl,
-)
-
-# =============================================================================
-# Class-based Interface
-# =============================================================================
-from .losses import (
-    SubsetKLLoss,
-    SubsetK2KLLoss,
-    SubsetK3KLLoss,
-    SubsetMonteCarloKLLoss,
-    SubsetHajekKLLoss,
-    KLDivergenceLoss,
-    FrankensteinKLLoss,
-    ImportanceKLLoss,
-)
-
 # =============================================================================
 # Base Classes and Types
 # =============================================================================
@@ -103,16 +66,52 @@ from .base import (
     ReductionType,
     apply_reduction,
 )
+from .core import (
+    TailProposalType,
+    compute_subset_hajek_kl,
+    compute_subset_k2_kl,
+    compute_subset_k3_kl,
+    # Convenience (when you have full logits)
+    compute_subset_kl,
+    compute_subset_mc_kl,
+    full_kl,
+    select_head_tail_indices,
+    select_indices_with_importance_sampling,
+    select_indices_with_sampling,
+    # Index selection
+    select_topk_indices,
+    subset_hajek_kl_from_gathered,
+    subset_k2_kl_from_gathered,
+    subset_k3_kl_from_gathered,
+    # KL computation on pre-gathered tensors
+    subset_kl_from_gathered,
+    subset_kl_from_gathered_with_weights,
+    subset_mc_kl_from_gathered,
+)
+from .experiments import evaluate_tail_proposal_grid
+
+# =============================================================================
+# Class-based Interface
+# =============================================================================
+from .losses import (
+    FrankensteinKLLoss,
+    ImportanceKLLoss,
+    KLDivergenceLoss,
+    SubsetHajekKLLoss,
+    SubsetK2KLLoss,
+    SubsetK3KLLoss,
+    SubsetKLLoss,
+    SubsetMonteCarloKLLoss,
+)
 
 # =============================================================================
 # Sampling Utilities (Advanced)
 # =============================================================================
 from .sampling import (
-    pps_sample_indices_batched,
-    frankenstein_kl_estimate,
     SamplingDiagnostics,
+    frankenstein_kl_estimate,
+    pps_sample_indices_batched,
 )
-from .experiments import evaluate_tail_proposal_grid
 
 __all__ = [
     # Version

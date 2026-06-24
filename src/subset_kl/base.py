@@ -4,22 +4,21 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Literal
+from typing import Literal
 
 import torch
-
 
 ReductionType = Literal["none", "mean", "sum"]
 
 
 def apply_reduction(
     loss: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
+    mask: torch.Tensor | None = None,
     reduction: ReductionType = "mean",
 ) -> torch.Tensor:
     """
     Apply reduction to per-token loss.
-    
+
     Parameters
     ----------
     loss : torch.Tensor
@@ -28,7 +27,7 @@ def apply_reduction(
         Attention mask of same shape as loss.
     reduction : str
         "none", "mean", or "sum".
-        
+
     Returns
     -------
     torch.Tensor
@@ -38,30 +37,30 @@ def apply_reduction(
         if mask is not None:
             return loss * mask.to(loss.dtype)
         return loss
-        
+
     if mask is not None:
         loss = loss * mask.to(loss.dtype)
-        
+
     if reduction == "sum":
         return loss.sum()
-        
+
     if reduction == "mean":
         if mask is not None:
             denom = mask.sum().clamp_min(1.0)
         else:
             denom = loss.numel()
         return loss.sum() / denom
-        
+
     raise ValueError(f"Unknown reduction: {reduction}")
 
 
 class BaseLoss(ABC):
     """
     Abstract base class for KL divergence losses.
-    
+
     All loss functions take student logits, teacher logits,
     and an optional attention mask, returning a scalar (or per-token) loss.
-    
+
     Parameters
     ----------
     reduction : str
@@ -76,11 +75,11 @@ class BaseLoss(ABC):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Compute the loss.
-        
+
         Parameters
         ----------
         student_logits : torch.Tensor
@@ -89,7 +88,7 @@ class BaseLoss(ABC):
             Logits from the teacher, shape [batch, seq, vocab].
         attention_mask : Optional[torch.Tensor]
             Mask indicating valid tokens, shape [batch, seq].
-            
+
         Returns
         -------
         torch.Tensor
@@ -101,7 +100,7 @@ class BaseLoss(ABC):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute loss (calls forward)."""
         return self.forward(
@@ -113,7 +112,7 @@ class BaseLoss(ABC):
     def _apply_reduction(
         self,
         loss: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply reduction to per-token loss."""
         return apply_reduction(loss, mask, self.reduction)

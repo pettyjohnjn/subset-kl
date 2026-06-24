@@ -8,14 +8,13 @@ where you want a stateful loss object.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn.functional as F
 
 from .base import BaseLoss, ReductionType
 from .core import (
     TailProposalType,
+    full_kl,
     select_head_tail_indices,
     select_topk_indices,
     subset_hajek_kl_from_gathered,
@@ -23,48 +22,47 @@ from .core import (
     subset_k3_kl_from_gathered,
     subset_kl_from_gathered,
     subset_mc_kl_from_gathered,
-    full_kl,
 )
 
 
 class SubsetKLLoss(BaseLoss):
     """
     Memory-efficient subset KL loss (class interface).
-    
+
     This class provides two usage patterns:
-    
+
     **Pattern 1: Full student logits (convenience, no memory savings)**
-    
+
         >>> loss_fn = SubsetKLLoss(k=256)
         >>> loss = loss_fn(student_logits, teacher_logits)  # [B,T,V] inputs
-    
+
     **Pattern 2: Pre-gathered tensors (memory-efficient)**
-    
+
         >>> loss_fn = SubsetKLLoss(k=256)
         >>> indices, teacher_k = loss_fn.select_indices(teacher_logits)
         >>> student_k = your_model.forward_subset(hidden, indices)  # You compute this!
         >>> loss = loss_fn.forward_gathered(student_k, teacher_k)
-    
+
     Parameters
     ----------
     k : int
         Number of top tokens to use.
     reduction : str
         "none", "mean", or "sum".
-        
+
     Examples
     --------
     Memory-efficient usage with a lens:
-    
+
         >>> loss_fn = SubsetKLLoss(k=256)
-        >>> 
+        >>>
         >>> # Step 1: Get indices from teacher
         >>> indices, teacher_k = loss_fn.select_indices(teacher_logits)
-        >>> 
+        >>>
         >>> # Step 2: Compute student logits only for those indices
         >>> # (Use indexed_logits or your lens's vocab_indices.)
         >>> student_k = lens.forward(hidden, vocab_indices=indices).logits
-        >>> 
+        >>>
         >>> # Step 3: Compute KL
         >>> loss = loss_fn.forward_gathered(student_k, teacher_k, attention_mask)
     """
@@ -76,9 +74,9 @@ class SubsetKLLoss(BaseLoss):
     ) -> None:
         super().__init__(reduction=reduction)
         self.k = k
-        
+
         # Cache last indices for debugging/inspection
-        self._last_indices: Optional[torch.Tensor] = None
+        self._last_indices: torch.Tensor | None = None
 
     def select_indices(
         self,
@@ -86,12 +84,12 @@ class SubsetKLLoss(BaseLoss):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Select top-k indices from teacher distribution.
-        
+
         Parameters
         ----------
         teacher_logits : torch.Tensor
             Teacher logits [batch, seq, vocab].
-            
+
         Returns
         -------
         indices : torch.Tensor
@@ -107,11 +105,11 @@ class SubsetKLLoss(BaseLoss):
         self,
         student_logits_k: torch.Tensor,
         teacher_logits_k: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Compute KL from pre-gathered subset logits.
-        
+
         Parameters
         ----------
         student_logits_k : torch.Tensor
@@ -120,7 +118,7 @@ class SubsetKLLoss(BaseLoss):
             Teacher logits for same subset [batch, seq, k].
         attention_mask : Optional[torch.Tensor]
             Mask [batch, seq].
-            
+
         Returns
         -------
         torch.Tensor
@@ -134,14 +132,14 @@ class SubsetKLLoss(BaseLoss):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Compute subset KL from full logits (convenience, no memory savings).
-        
+
         This requires full [B, T, V] student logits. For efficiency, use
         `select_indices()` + your model's subset forward + `forward_gathered()`.
-        
+
         Parameters
         ----------
         student_logits : torch.Tensor
@@ -156,7 +154,7 @@ class SubsetKLLoss(BaseLoss):
         return self.forward_gathered(student_k, teacher_k, attention_mask)
 
     @property
-    def last_indices(self) -> Optional[torch.Tensor]:
+    def last_indices(self) -> torch.Tensor | None:
         """Last selected indices (for debugging)."""
         return self._last_indices
 
@@ -167,9 +165,9 @@ class SubsetKLLoss(BaseLoss):
 class KLDivergenceLoss(BaseLoss):
     """
     Full-vocabulary KL divergence loss (baseline).
-    
+
     Use this for comparison with subset KL, or when memory isn't a concern.
-    
+
     Parameters
     ----------
     reduction : str
@@ -184,7 +182,7 @@ class KLDivergenceLoss(BaseLoss):
         self,
         reduction: ReductionType = "mean",
         temperature: float = 1.0,
-        chunk_size: Optional[int] = None,
+        chunk_size: int | None = None,
     ) -> None:
         super().__init__(reduction=reduction)
         self.temperature = temperature
@@ -194,12 +192,12 @@ class KLDivergenceLoss(BaseLoss):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute full-vocabulary KL divergence."""
         if self.chunk_size is not None:
             return self._forward_chunked(student_logits, teacher_logits, attention_mask)
-        
+
         return full_kl(
             student_logits, teacher_logits, attention_mask,
             self.reduction, self.temperature
@@ -209,41 +207,41 @@ class KLDivergenceLoss(BaseLoss):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
+        attention_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         """Chunked computation for memory efficiency."""
         batch, seq, vocab = student_logits.shape
         chunk_size = self.chunk_size
-        
+
         total_loss = torch.zeros((), device=student_logits.device, dtype=torch.float32)
         total_count = torch.zeros((), device=student_logits.device, dtype=torch.float32)
-        
+
         for t0 in range(0, seq, chunk_size):
             t1 = min(t0 + chunk_size, seq)
-            
+
             s_chunk = student_logits[:, t0:t1, :]
             t_chunk = teacher_logits[:, t0:t1, :]
             m_chunk = attention_mask[:, t0:t1] if attention_mask is not None else None
-            
+
             # Apply temperature
             if self.temperature != 1.0:
                 s_chunk = s_chunk / self.temperature
                 t_chunk = t_chunk / self.temperature
-            
+
             s_logprobs = F.log_softmax(s_chunk, dim=-1)
             t_logprobs = F.log_softmax(t_chunk, dim=-1)
             t_probs = t_logprobs.exp()
-            
+
             kl_chunk = (t_probs * (t_logprobs - s_logprobs)).sum(dim=-1)
-            
+
             if m_chunk is not None:
                 kl_chunk = kl_chunk * m_chunk.to(kl_chunk.dtype)
                 total_count += m_chunk.sum()
             else:
                 total_count += kl_chunk.numel()
-            
+
             total_loss += kl_chunk.sum()
-        
+
         if self.reduction == "sum":
             return total_loss
         elif self.reduction == "mean":
@@ -289,14 +287,14 @@ class SubsetK2KLLoss(BaseLoss):
         self.tail_proposal = tail_proposal
         self.tail_proposal_alpha = tail_proposal_alpha
         self.tail_proposal_tau = tail_proposal_tau
-        self._last_indices: Optional[torch.Tensor] = None
-        self._last_p_head: Optional[torch.Tensor] = None
-        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+        self._last_indices: torch.Tensor | None = None
+        self._last_p_head: torch.Tensor | None = None
+        self._last_tail_proposal_log_probs: torch.Tensor | None = None
 
     def select_indices(
         self,
         teacher_logits: torch.Tensor,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Select top-k head plus sampled tail indices.
@@ -318,9 +316,9 @@ class SubsetK2KLLoss(BaseLoss):
         self,
         student_logits_selected: torch.Tensor,
         teacher_log_probs_selected: torch.Tensor,
-        p_head: Optional[torch.Tensor] = None,
-        student_log_normalizer: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        p_head: torch.Tensor | None = None,
+        student_log_normalizer: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute subset K2 KL from pre-gathered selected logits."""
         return subset_k2_kl_from_gathered(
@@ -338,7 +336,7 @@ class SubsetK2KLLoss(BaseLoss):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute subset K2 KL from full logits as a convenience path."""
         indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
@@ -353,12 +351,12 @@ class SubsetK2KLLoss(BaseLoss):
         )
 
     @property
-    def last_indices(self) -> Optional[torch.Tensor]:
+    def last_indices(self) -> torch.Tensor | None:
         """Last selected indices."""
         return self._last_indices
 
     @property
-    def last_p_head(self) -> Optional[torch.Tensor]:
+    def last_p_head(self) -> torch.Tensor | None:
         """Last teacher head mass."""
         return self._last_p_head
 
@@ -399,14 +397,14 @@ class SubsetK3KLLoss(BaseLoss):
         self.tail_proposal = tail_proposal
         self.tail_proposal_alpha = tail_proposal_alpha
         self.tail_proposal_tau = tail_proposal_tau
-        self._last_indices: Optional[torch.Tensor] = None
-        self._last_p_head: Optional[torch.Tensor] = None
-        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+        self._last_indices: torch.Tensor | None = None
+        self._last_p_head: torch.Tensor | None = None
+        self._last_tail_proposal_log_probs: torch.Tensor | None = None
 
     def select_indices(
         self,
         teacher_logits: torch.Tensor,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Select top-k head plus sampled tail indices.
@@ -428,9 +426,9 @@ class SubsetK3KLLoss(BaseLoss):
         self,
         student_logits_selected: torch.Tensor,
         teacher_log_probs_selected: torch.Tensor,
-        p_head: Optional[torch.Tensor] = None,
-        student_log_normalizer: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        p_head: torch.Tensor | None = None,
+        student_log_normalizer: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute subset K3 KL from pre-gathered selected logits."""
         return subset_k3_kl_from_gathered(
@@ -448,7 +446,7 @@ class SubsetK3KLLoss(BaseLoss):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute subset K3 KL from full logits as a convenience path."""
         indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
@@ -463,12 +461,12 @@ class SubsetK3KLLoss(BaseLoss):
         )
 
     @property
-    def last_indices(self) -> Optional[torch.Tensor]:
+    def last_indices(self) -> torch.Tensor | None:
         """Last selected indices."""
         return self._last_indices
 
     @property
-    def last_p_head(self) -> Optional[torch.Tensor]:
+    def last_p_head(self) -> torch.Tensor | None:
         """Last teacher head mass."""
         return self._last_p_head
 
@@ -504,14 +502,14 @@ class SubsetMonteCarloKLLoss(BaseLoss):
         self.tail_proposal = tail_proposal
         self.tail_proposal_alpha = tail_proposal_alpha
         self.tail_proposal_tau = tail_proposal_tau
-        self._last_indices: Optional[torch.Tensor] = None
-        self._last_p_head: Optional[torch.Tensor] = None
-        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+        self._last_indices: torch.Tensor | None = None
+        self._last_p_head: torch.Tensor | None = None
+        self._last_tail_proposal_log_probs: torch.Tensor | None = None
 
     def select_indices(
         self,
         teacher_logits: torch.Tensor,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Select top-k head plus sampled tail indices."""
         selected = select_head_tail_indices(
@@ -538,10 +536,10 @@ class SubsetMonteCarloKLLoss(BaseLoss):
         self,
         student_logits_selected: torch.Tensor,
         teacher_log_probs_selected: torch.Tensor,
-        p_head: Optional[torch.Tensor] = None,
-        student_log_normalizer: Optional[torch.Tensor] = None,
-        tail_proposal_log_probs_selected: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        p_head: torch.Tensor | None = None,
+        student_log_normalizer: torch.Tensor | None = None,
+        tail_proposal_log_probs_selected: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute Monte Carlo KL from pre-gathered selected logits."""
         return subset_mc_kl_from_gathered(
@@ -560,7 +558,7 @@ class SubsetMonteCarloKLLoss(BaseLoss):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute Monte Carlo KL from full logits as a convenience path."""
         indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
@@ -576,17 +574,17 @@ class SubsetMonteCarloKLLoss(BaseLoss):
         )
 
     @property
-    def last_indices(self) -> Optional[torch.Tensor]:
+    def last_indices(self) -> torch.Tensor | None:
         """Last selected indices."""
         return self._last_indices
 
     @property
-    def last_p_head(self) -> Optional[torch.Tensor]:
+    def last_p_head(self) -> torch.Tensor | None:
         """Last teacher head mass."""
         return self._last_p_head
 
     @property
-    def last_tail_proposal_log_probs(self) -> Optional[torch.Tensor]:
+    def last_tail_proposal_log_probs(self) -> torch.Tensor | None:
         """Last selected tail proposal log-probabilities."""
         return self._last_tail_proposal_log_probs
 
@@ -621,14 +619,14 @@ class SubsetHajekKLLoss(BaseLoss):
         self.tail_proposal = tail_proposal
         self.tail_proposal_alpha = tail_proposal_alpha
         self.tail_proposal_tau = tail_proposal_tau
-        self._last_indices: Optional[torch.Tensor] = None
-        self._last_p_head: Optional[torch.Tensor] = None
-        self._last_tail_proposal_log_probs: Optional[torch.Tensor] = None
+        self._last_indices: torch.Tensor | None = None
+        self._last_p_head: torch.Tensor | None = None
+        self._last_tail_proposal_log_probs: torch.Tensor | None = None
 
     def select_indices(
         self,
         teacher_logits: torch.Tensor,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Select top-k head plus sampled tail indices."""
         selected = select_head_tail_indices(
@@ -655,10 +653,10 @@ class SubsetHajekKLLoss(BaseLoss):
         self,
         student_logits_selected: torch.Tensor,
         teacher_log_probs_selected: torch.Tensor,
-        p_head: Optional[torch.Tensor] = None,
-        student_log_normalizer: Optional[torch.Tensor] = None,
-        tail_proposal_log_probs_selected: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        p_head: torch.Tensor | None = None,
+        student_log_normalizer: torch.Tensor | None = None,
+        tail_proposal_log_probs_selected: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute Hajek KL from pre-gathered selected logits."""
         return subset_hajek_kl_from_gathered(
@@ -677,7 +675,7 @@ class SubsetHajekKLLoss(BaseLoss):
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute Hajek KL from full logits as a convenience path."""
         indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
@@ -693,17 +691,17 @@ class SubsetHajekKLLoss(BaseLoss):
         )
 
     @property
-    def last_indices(self) -> Optional[torch.Tensor]:
+    def last_indices(self) -> torch.Tensor | None:
         """Last selected indices."""
         return self._last_indices
 
     @property
-    def last_p_head(self) -> Optional[torch.Tensor]:
+    def last_p_head(self) -> torch.Tensor | None:
         """Last teacher head mass."""
         return self._last_p_head
 
     @property
-    def last_tail_proposal_log_probs(self) -> Optional[torch.Tensor]:
+    def last_tail_proposal_log_probs(self) -> torch.Tensor | None:
         """Last selected tail proposal log-probabilities."""
         return self._last_tail_proposal_log_probs
 
@@ -717,11 +715,11 @@ class SubsetHajekKLLoss(BaseLoss):
 class FrankensteinKLLoss(BaseLoss):
     """
     Importance-weighted KL loss using Frankenstein estimator.
-    
+
     This provides an unbiased estimator but has higher variance.
     For most cases, `SubsetKLLoss` (pure top-k) is preferred.
     Set k_head=0 for pure importance sampling (no deterministic head).
-    
+
     Parameters
     ----------
     k_head : int
@@ -749,28 +747,28 @@ class FrankensteinKLLoss(BaseLoss):
         self.k_tail = k_tail
         self.weight_clip = weight_clip
         self.oversample = oversample
-        
-        self._last_variance_proxy: Optional[float] = None
+
+        self._last_variance_proxy: float | None = None
         self._last_diagnostics = None
 
     def forward(
         self,
         student_logits: torch.Tensor,
         teacher_logits: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute importance-weighted KL."""
-        from .sampling import pps_sample_indices_batched, frankenstein_kl_estimate
-        
+        from .sampling import frankenstein_kl_estimate, pps_sample_indices_batched
+
         B, T, V = student_logits.shape
-        
+
         # Flatten for sampling
         teacher_flat = teacher_logits.view(B * T, V)
         student_flat = student_logits.view(B * T, V)
-        
+
         with torch.no_grad():
             teacher_log_probs = F.log_softmax(teacher_flat, dim=-1)
-            
+
             indices, inc_probs, mask, diagnostics = pps_sample_indices_batched(
                 teacher_log_probs,
                 k_head=self.k_head,
@@ -778,22 +776,22 @@ class FrankensteinKLLoss(BaseLoss):
                 oversample=self.oversample,
             )
             self._last_diagnostics = diagnostics
-        
+
         # Gather values
         teacher_sel = torch.gather(teacher_log_probs, -1, indices)
         student_sel = torch.gather(student_flat, -1, indices)
-        
+
         # Frankenstein estimator
         kl_flat, variance_proxy = frankenstein_kl_estimate(
             teacher_sel, student_sel, indices, inc_probs, mask, self.weight_clip
         )
         self._last_variance_proxy = variance_proxy
-        
+
         kl = kl_flat.view(B, T)
         return self._apply_reduction(kl, attention_mask)
 
     @property
-    def variance_proxy(self) -> Optional[float]:
+    def variance_proxy(self) -> float | None:
         """Variance proxy from last computation."""
         return self._last_variance_proxy
 
@@ -812,7 +810,7 @@ class FrankensteinKLLoss(BaseLoss):
 class ImportanceKLLoss(FrankensteinKLLoss):
     """
     Pure importance-sampling KL loss (no deterministic head).
-    
+
     This is a convenience wrapper around FrankensteinKLLoss with k_head=0.
     """
 

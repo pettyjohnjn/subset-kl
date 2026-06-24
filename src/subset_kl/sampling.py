@@ -13,7 +13,6 @@ For most use cases, the simple top-k approach via
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -26,8 +25,8 @@ class SamplingDiagnostics:
     mean_inclusion_prob: float
     min_inclusion_prob: float
     max_importance_weight: float
-    variance_proxy: Optional[float] = None
-    
+    variance_proxy: float | None = None
+
     def __repr__(self) -> str:
         return (
             f"SamplingDiagnostics(unique={self.num_unique_indices}, "
@@ -42,14 +41,14 @@ def pps_sample_indices_batched(
     k_head: int,
     k_tail: int,
     oversample: int = 4,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, SamplingDiagnostics]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, SamplingDiagnostics]:
     """
     Probability Proportional to Size sampling with deterministic head.
-    
+
     Combines top-k (deterministic head) with PPS sampling (stochastic tail)
     for a hybrid subset that captures both high-probability tokens and
     provides unbiased coverage of the tail distribution.
-    
+
     Parameters
     ----------
     log_probs : torch.Tensor
@@ -61,7 +60,7 @@ def pps_sample_indices_batched(
         Number of additional tokens to sample from tail.
     oversample : int
         Oversample factor for PPS (draw oversample*k_tail then deduplicate).
-        
+
     Returns
     -------
     indices : torch.Tensor
@@ -80,17 +79,17 @@ def pps_sample_indices_batched(
         raise ValueError("k_head and k_tail must be non-negative")
     if k_head + k_tail == 0:
         raise ValueError("k_head + k_tail must be > 0")
-    
+
     # Ensure numerical stability
     log_probs = log_probs.float()
     probs = F.softmax(log_probs, dim=-1)
-    
+
     # HEAD: Top-k deterministic indices
     if k_head > 0:
         _, top_idx = log_probs.topk(k_head, dim=-1)  # [N, k_head]
     else:
         top_idx = torch.empty(N, 0, device=device, dtype=torch.long)
-    
+
     # Renormalize probabilities over tail
     tail_probs = probs.clone()
     if k_head > 0:
@@ -99,7 +98,7 @@ def pps_sample_indices_batched(
     else:
         tail_sum = tail_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     tail_probs = tail_probs / tail_sum
-    
+
     # PPS sampling from tail with replacement
     num_draws = k_tail * oversample
     if num_draws > 0 and (tail_sum > 1e-10).any():
@@ -109,15 +108,15 @@ def pps_sample_indices_batched(
             num_samples=min(num_draws, V - k_head),
             replacement=True
         )  # [N, num_draws]
-        
+
         # Combine head and tail
         all_idx = torch.cat([top_idx, sampled], dim=-1)
-        
+
         # Deduplicate via sort + unique detection
         all_idx_sorted, _ = all_idx.sort(dim=-1)
         diff = torch.diff(all_idx_sorted, dim=-1, prepend=all_idx_sorted[:, :1] - 1)
         keep_mask = diff != 0
-        
+
         # Compact unique indices without a Python row loop
         counts = keep_mask.sum(dim=-1)
         S_max = min(k_head + k_tail, counts.max().item())
@@ -136,26 +135,26 @@ def pps_sample_indices_batched(
         # No tail sampling
         indices = top_idx
         mask = torch.ones(N, k_head, device=device, dtype=torch.bool)
-    
+
     # Compute inclusion probabilities
     inclusion_probs = torch.ones_like(indices, dtype=torch.float32)
-    
+
     if k_tail > 0 and num_draws > 0:
         # Gather probabilities for selected indices
         p_sel = torch.gather(probs, 1, indices)
-        
+
         # Identify which are head (prob >= top-k threshold)
         if k_head > 0:
             p_head_min = torch.gather(probs, 1, top_idx[:, -1:])
             is_head = p_sel >= p_head_min
         else:
             is_head = torch.zeros_like(p_sel, dtype=torch.bool)
-        
+
         # For tail items: π_i = 1 - (1-p_i)^m
         tail_inclusion = 1.0 - torch.pow(1.0 - p_sel, num_draws)
         inclusion_probs = torch.where(is_head, torch.ones_like(p_sel), tail_inclusion)
         inclusion_probs = inclusion_probs.clamp_min(1e-8)
-    
+
     # Compute diagnostics
     valid_inclusion = inclusion_probs[mask]
     diagnostics = SamplingDiagnostics(
@@ -164,28 +163,28 @@ def pps_sample_indices_batched(
         min_inclusion_prob=valid_inclusion.min().item() if valid_inclusion.numel() > 0 else 1.0,
         max_importance_weight=(1.0 / valid_inclusion.min()).item() if valid_inclusion.numel() > 0 else 1.0,
     )
-    
+
     return indices, inclusion_probs, mask, diagnostics
 
 
 def frankenstein_kl_estimate(
     teacher_log_probs: torch.Tensor,
     student_logits: torch.Tensor,
-    indices: Optional[torch.Tensor],
+    indices: torch.Tensor | None,
     inclusion_probs: torch.Tensor,
     mask: torch.Tensor,
     weight_clip: float = 50.0,
-) -> Tuple[torch.Tensor, float]:
+) -> tuple[torch.Tensor, float]:
     """
     Frankenstein (self-normalized) importance sampling estimator for KL divergence.
-    
+
     Provides an approximately unbiased estimate of the full-vocabulary
     KL divergence using only a subset of vocabulary indices.
-    
+
     KL(P || Q) ≈ Σ_i∈S w_i * P_i * (log P_i - log Q_i) / Σ_i∈S w_i * P_i
-    
+
     where w_i = 1/π_i are importance weights.
-    
+
     Parameters
     ----------
     teacher_log_probs : torch.Tensor
@@ -201,7 +200,7 @@ def frankenstein_kl_estimate(
         Valid mask [N, S].
     weight_clip : float
         Maximum importance weight to prevent variance explosion.
-        
+
     Returns
     -------
     kl : torch.Tensor
@@ -212,24 +211,24 @@ def frankenstein_kl_estimate(
     # Importance weights: w_i = 1/π_i
     weights = (1.0 / inclusion_probs).clamp(max=weight_clip)
     weights = weights * mask.float()
-    
+
     # Teacher probabilities
     teacher_probs = teacher_log_probs.exp()
-    
+
     # Student log-probabilities via log-softmax over subset
     student_log_probs = F.log_softmax(student_logits, dim=-1)
-    
+
     # Weighted KL terms
     kl_terms = teacher_probs * (teacher_log_probs - student_log_probs) * weights
-    
+
     # Self-normalize (Frankenstein estimator)
     numerator = (kl_terms * mask.float()).sum(dim=-1)
     denominator = (teacher_probs * weights * mask.float()).sum(dim=-1).clamp_min(1e-8)
-    
+
     kl = numerator / denominator
-    
+
     # Variance proxy
     w_normalized = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-8)
     variance_proxy = (w_normalized ** 2 * mask.float()).sum().item() / max(mask.shape[0], 1)
-    
+
     return kl, variance_proxy

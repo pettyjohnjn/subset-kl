@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Literal, Optional
+from collections.abc import Iterable
+from typing import Literal
 
 import torch
 
 from .core import TailProposalType, compute_subset_hajek_kl, compute_subset_mc_kl, full_kl
-
 
 TailEstimator = Literal["mc", "hajek"]
 
@@ -20,10 +20,10 @@ def evaluate_tail_proposal_grid(
     estimator: TailEstimator = "hajek",
     alpha_values: Iterable[float] = (0.6, 0.8, 0.9, 1.0),
     tau_values: Iterable[float] = (0.5, 0.7, 0.9),
-    sample_counts: Optional[Iterable[int]] = None,
+    sample_counts: Iterable[int] | None = None,
     num_trials: int = 32,
     base_seed: int = 0,
-) -> list[Dict[str, float | int | str]]:
+) -> list[dict[str, float | int | str]]:
     """
     Repeated-trial comparison for target, tempered, mixed, and top-k baselines.
 
@@ -45,7 +45,7 @@ def evaluate_tail_proposal_grid(
         k_tail=0,
         reduction="none",
     )
-    rows: list[Dict[str, float | int | str]] = [
+    rows: list[dict[str, float | int | str]] = [
         _summarize_trials(
             name="topk_only",
             estimates=topk.unsqueeze(0),
@@ -127,20 +127,20 @@ def _summarize_trials(
     name: str,
     estimates: torch.Tensor,
     exact: torch.Tensor,
-    ess_values: Optional[list[float]],
-    max_weights: Optional[list[float]],
-    weight_variances: Optional[list[float]],
-    extreme_frequencies: Optional[list[float]],
+    ess_values: list[float] | None,
+    max_weights: list[float] | None,
+    weight_variances: list[float] | None,
+    extreme_frequencies: list[float] | None,
     sample_count: int,
     alpha: float,
     tau: float,
     proposal: str,
-) -> Dict[str, float | int | str]:
+) -> dict[str, float | int | str]:
     estimates_f = estimates.float()
     mean_estimate = estimates_f.mean(dim=0)
     trial_means = estimates_f.reshape(estimates.shape[0], -1).mean(dim=-1)
     err = mean_estimate - exact.float()
-    row: Dict[str, float | int | str] = {
+    row: dict[str, float | int | str] = {
         "name": name,
         "proposal": proposal,
         "sample_count": sample_count,
