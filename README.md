@@ -117,74 +117,40 @@ loss = full_kl(student_logits, teacher_logits)
 ### Class Interface
 
 ```python
-# Subset KL
+# Subset KL (top-k)
 loss_fn = SubsetKLLoss(k=256, reduction="mean")
-indices, teacher_k = loss_fn.select_indices(teacher_logits)
-loss = loss_fn.forward_gathered(student_k, teacher_k)  # Efficient path
 loss = loss_fn(student_logits, teacher_logits)  # Convenience path
 
-# Full KL (baseline)
+# Full KL (baseline for comparison)
 loss_fn = KLDivergenceLoss(reduction="mean", temperature=1.0)
 
-# Importance-weighted KL (advanced)
-loss_fn = FrankensteinKLLoss(k_head=128, k_tail=64)
-
-# Top-k head + teacher-tail K2 penalty
-loss_fn = SubsetK2KLLoss(k_head=256, k_tail=256)
-
-# Exact head + sampled teacher-tail KL estimators
+# Exact top-k head + Monte Carlo teacher-tail estimate
 loss_fn = SubsetMonteCarloKLLoss(k_head=256, k_tail=256)
-loss_fn = SubsetHajekKLLoss(k_head=256, k_tail=256)
 ```
 
-### Sampling Utilities (Advanced)
+Two estimators are provided:
+- **Top-k** — KL renormalized over the teacher's top-k tokens. Fast and the
+  recommended default.
+- **Monte Carlo (MC)** — exact KL on the top-k head plus an importance-weighted
+  estimate of the tail, sampled from the (normalized) teacher tail. Use when the
+  renormalized top-k underestimates the tail.
 
-For importance sampling (unbiased estimator, higher variance):
+### Monte Carlo Tail Estimator (Advanced)
 
-```python
-from subset_kl import select_indices_with_sampling, subset_kl_from_gathered_with_weights
-import torch.nn.functional as F
-
-# Select with head + tail sampling
-indices, teacher_k, inclusion_probs, mask = select_indices_with_sampling(
-    teacher_logits, k_head=128, k_tail=64
-)
-
-# Compute student logits for selected indices (YOUR responsibility)
-student_k = your_model.forward_subset(hidden, indices)
-
-# Importance-weighted KL
-loss = subset_kl_from_gathered_with_weights(
-    student_k, F.log_softmax(teacher_k, dim=-1), inclusion_probs, mask
-)
-```
-
-Pure importance sampling (no deterministic head) is supported by setting
-`k_head=0` or by using `select_indices_with_importance_sampling`.
-
-Sampling strategies at a glance:
-- Head only: `select_topk_indices`
-- Head + P-tail K2: `select_head_tail_indices` + `subset_k2_kl_from_gathered`
-- Head + P-tail K3: `select_head_tail_indices` + `subset_k3_kl_from_gathered`
-- Exact head + P-tail MC: `select_head_tail_indices` + `subset_mc_kl_from_gathered`
-- Exact head + P-tail Hajek: `select_head_tail_indices` + `subset_hajek_kl_from_gathered`
-- Head + tail: `select_indices_with_sampling(k_head>0, k_tail>0)`
-- Tail only: `select_indices_with_importance_sampling` or `k_head=0`
-
-### Subset KL With Tail K2 or K3 Penalty
-
-For early-layer fidelity experiments, use the explicit head-plus-tail objective:
+For the memory-efficient MC path, select a head plus sampled tail, compute
+student logits only for those indices, and supply the student full-vocabulary
+log-normalizer (the tail term needs true student log-probabilities):
 
 ```python
-from subset_kl import select_head_tail_indices, subset_k3_kl_from_gathered
+from subset_kl import select_head_tail_indices, subset_mc_kl_from_gathered
 
 indices, teacher_log_probs, p_head = select_head_tail_indices(
     teacher_logits, k_head=256, k_tail=256
 )
 student_selected = your_model.forward_subset(hidden, indices)
-student_log_normalizer = your_model.full_vocab_logsumexp(hidden)
+student_log_normalizer = your_model.full_vocab_logsumexp(hidden)  # logsumexp over V
 
-loss = subset_k3_kl_from_gathered(
+loss = subset_mc_kl_from_gathered(
     student_selected,
     teacher_log_probs,
     k_head=256,
@@ -195,15 +161,9 @@ loss = subset_k3_kl_from_gathered(
 )
 ```
 
-This computes the usual top-k head KL and adds
-Schulman's K3 estimator
-`(1 - p_head.detach()) / k_tail * sum(exp(log_q_tail - log_p_tail) - 1 - (log_q_tail - log_p_tail))`.
-The K2 variant uses
-`(1 - p_head.detach()) / k_tail * sum((log_p_tail - log_q_tail) ** 2)`.
-The tail tokens are sampled with replacement from the teacher tail distribution.
-The tail term requires full-vocabulary student log-probabilities; selected
-student logits alone are insufficient, so the gathered path must receive the
-student full-vocabulary log normalizer.
+Estimators at a glance:
+- Head only (renormalized): `select_topk_indices` + `subset_kl_from_gathered`
+- Exact head + sampled tail (MC): `select_head_tail_indices` + `subset_mc_kl_from_gathered`
 
 ## Memory Comparison
 
