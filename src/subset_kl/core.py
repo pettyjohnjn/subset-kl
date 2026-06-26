@@ -34,9 +34,7 @@ from .base import ReductionType, apply_reduction
 TailProposalType = Literal["target", "teacher", "mixed", "tempered"]
 
 
-# =============================================================================
 # Index Selection
-# =============================================================================
 
 def select_topk_indices(
     teacher_logits: torch.Tensor,
@@ -233,9 +231,7 @@ def select_head_tail_indices(
     return indices, teacher_log_probs_selected, p_head
 
 
-# =============================================================================
 # KL Computation on Pre-Gathered Tensors
-# =============================================================================
 
 def subset_kl_from_gathered(
     student_logits_k: torch.Tensor,
@@ -433,9 +429,7 @@ def _tail_estimator_diagnostics(
     return result
 
 
-# =============================================================================
 # Convenience: All-in-one when you have full logits
-# =============================================================================
 
 def compute_subset_kl(
     student_logits: torch.Tensor,
@@ -537,9 +531,7 @@ def compute_subset_mc_kl(
     )
 
 
-# =============================================================================
 # Full KL for comparison
-# =============================================================================
 
 def full_kl(
     student_logits: torch.Tensor,

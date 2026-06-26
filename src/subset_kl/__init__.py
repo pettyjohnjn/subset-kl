@@ -55,18 +55,14 @@ For V=128k vocabulary, B=2, T=1024:
 
 __version__ = "0.1.0"
 
-# =============================================================================
 # Base Classes and Types
-# =============================================================================
 from .base import (
     BaseLoss,
     ReductionType,
     apply_reduction,
 )
 
-# =============================================================================
 # Core Functional Interface (RECOMMENDED)
-# =============================================================================
 from .core import (
     TailProposalType,
     # Convenience (when you have full logits)
@@ -81,9 +77,7 @@ from .core import (
     subset_mc_kl_from_gathered,
 )
 
-# =============================================================================
 # Class-based Interface
-# =============================================================================
 from .losses import (
     KLDivergenceLoss,
     SubsetKLLoss,
