@@ -31,3 +31,6 @@ venv/
 
 # OS
 .DS_Store
+
+# crash dumps
+core.*
