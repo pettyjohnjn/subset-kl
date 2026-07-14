@@ -1,0 +1,173 @@
+site_name: Subset KL
+#site_url: TBD
+repo_name: pettyjohnjn/subset-kl/
+repo_url: https://github.com/pettyjohnjn/subset-kl/
+
+
+########################################################################################################################
+# NAVIGATION
+########################################################################################################################
+
+nav:
+  - Home:
+      - index.md
+#      - home/federated_learning.md
+#      - home/globus_compute.md
+#      - home/proxystore.md
+#  - Getting Started:
+#      - getting_started/quickstart.md
+#      - getting_started/topologies.md
+#      - Strategies:
+#          - getting_started/strategies/index.md
+#          - getting_started/strategies/what.md
+#          - getting_started/strategies/callbacks.md
+#          - getting_started/strategies/custom.md
+#  - FAQ: faq.md
+#  - Publications: publications/index.md
+  - Docs: docs/
+
+copyright:
+  Copyright &copy; 2022 - 2026 Globus Labs, University of Chicago.
+
+########################################################################################################################
+########################################################################################################################
+########################################################################################################################
+
+watch:
+  - docs/
+  - src/
+  - mkdocs.yml
+  - README.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/slack
+      link: https://join.slack.com/t/funcx/shared_invite/zt-gfeclqkz-RuKjkZkvj1t~eWvlnZV0KA
+      name: Join the funcX Slack!
+    - icon: fontawesome/brands/github
+      link: https://github.com/pettyjohnjn/subset-kl/
+
+extra_css:
+  - stylesheets/extra.css
+  - stylesheets/mkdocstrings.css
+  - stylesheets/youtube.css
+  - stylesheets/api.css
+
+theme:
+  name: material
+  language: en
+  icon: #assets/logos/favicon-dark.svg
+    logo: material/magnify
+    favicon: material/magnify
+    repo: fontawesome/brands/github-alt
+  #  favicon: ...
+  font:
+    text: Open Sans
+    code: JetBrains Mono
+  features:
+    - content.code.annotate
+    - content.code.copy
+    - content.code.select
+    - navigation.footer
+    - navigation.path
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+      primary: indigo
+      accent: deep orange
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+      primary: indigo # black
+      accent: amber
+
+
+########################################################################################################################
+########################################################################################################################
+########################################################################################################################
+
+
+plugins:
+  - mermaid2
+  - search
+  - section-index
+  - gen-files:
+      scripts:
+        - docs/generate_api.py
+  - literate-nav:
+      nav_file: SUMMARY.md
+  - mkdocstrings:
+      custom_templates: docs/_templates
+      enable_inventory: true
+      handlers:
+        python:
+          paths: [ src ]
+          load_external_modules: true
+          options:
+            docstring_section_style: spacy # list
+            docstring_style: numpy # google
+            group_by_category: true
+            inherited_members: yes
+            line_length: 60
+            members_order: alphabetical  # source
+            merge_init_into_class: yes
+            separate_signature: yes
+            show_root_full_path: yes
+            show_signature_annotations: yes
+            show_source: false
+            show_submodules: false
+            show_labels: true
+            # summary: true
+
+
+########################################################################################################################
+########################################################################################################################
+########################################################################################################################
+
+
+markdown_extensions:
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+      # Math typesetting
+  - pymdownx.arithmatex:
+      generic: true
+
+  # Syntax highlighting for code blocks
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.details
+  - pymdownx.superfences:
+      # make exceptions to highlighting of code:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid_custom
+  - pymdownx.mark
+  - footnotes
+  - attr_list
+
+# JavaScript for math typesetting
+extra_javascript:
+  - https://unpkg.com/browse/mermaid@11.0.2/dist/mermaid.min.js
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js

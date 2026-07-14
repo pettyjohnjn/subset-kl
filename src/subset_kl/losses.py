@@ -30,8 +30,10 @@ class SubsetKLLoss(BaseLoss):
 
     **Pattern 1: Full student logits (convenience, no memory savings)**
 
-        >>> loss_fn = SubsetKLLoss(k=256)
-        >>> loss = loss_fn(student_logits, teacher_logits)  # [B,T,V] inputs
+    ```python
+    loss_fn = SubsetKLLoss(k=256)
+    loss = loss_fn(student_logits, teacher_logits)  # [B,T,V] inputs
+    ```
 
     **Pattern 2: Pre-gathered tensors (memory-efficient)**
 
@@ -193,11 +195,16 @@ class KLDivergenceLoss(BaseLoss):
     ) -> torch.Tensor:
         """Compute full-vocabulary KL divergence."""
         if self.chunk_size is not None:
-            return self._forward_chunked(student_logits, teacher_logits, attention_mask)
+            return self._forward_chunked(
+                student_logits, teacher_logits, attention_mask
+            )
 
         return full_kl(
-            student_logits, teacher_logits, attention_mask,
-            self.reduction, self.temperature
+            student_logits,
+            teacher_logits,
+            attention_mask,
+            self.reduction,
+            self.temperature,
         )
 
     def _forward_chunked(
@@ -210,15 +217,21 @@ class KLDivergenceLoss(BaseLoss):
         batch, seq, vocab = student_logits.shape
         chunk_size = self.chunk_size
 
-        total_loss = torch.zeros((), device=student_logits.device, dtype=torch.float32)
-        total_count = torch.zeros((), device=student_logits.device, dtype=torch.float32)
+        total_loss = torch.zeros(
+            (), device=student_logits.device, dtype=torch.float32
+        )
+        total_count = torch.zeros(
+            (), device=student_logits.device, dtype=torch.float32
+        )
 
         for t0 in range(0, seq, chunk_size):
             t1 = min(t0 + chunk_size, seq)
 
             s_chunk = student_logits[:, t0:t1, :]
             t_chunk = teacher_logits[:, t0:t1, :]
-            m_chunk = attention_mask[:, t0:t1] if attention_mask is not None else None
+            m_chunk = (
+                attention_mask[:, t0:t1] if attention_mask is not None else None
+            )
 
             # Apply temperature
             if self.temperature != 1.0:
@@ -244,7 +257,9 @@ class KLDivergenceLoss(BaseLoss):
         elif self.reduction == "mean":
             return total_loss / total_count.clamp_min(1.0)
         else:
-            raise ValueError("Chunked KL only supports 'mean' or 'sum' reduction")
+            raise ValueError(
+                "Chunked KL only supports 'mean' or 'sum' reduction"
+            )
 
     def __repr__(self) -> str:
         parts = [f"reduction={self.reduction!r}"]
@@ -298,10 +313,16 @@ class SubsetMonteCarloKLLoss(BaseLoss):
             tail_proposal=self.tail_proposal,
             tail_proposal_alpha=self.tail_proposal_alpha,
             tail_proposal_tau=self.tail_proposal_tau,
-            return_tail_proposal_log_probs=self.tail_proposal not in {"target", "teacher"},
+            return_tail_proposal_log_probs=self.tail_proposal
+            not in {"target", "teacher"},
         )
         if self.tail_proposal not in {"target", "teacher"}:
-            indices, teacher_log_probs_selected, p_head, tail_proposal_log_probs = selected
+            (
+                indices,
+                teacher_log_probs_selected,
+                p_head,
+                tail_proposal_log_probs,
+            ) = selected
         else:
             indices, teacher_log_probs_selected, p_head = selected
             tail_proposal_log_probs = None
@@ -339,7 +360,9 @@ class SubsetMonteCarloKLLoss(BaseLoss):
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute Monte Carlo KL from full logits as a convenience path."""
-        indices, teacher_log_probs_selected, p_head = self.select_indices(teacher_logits)
+        indices, teacher_log_probs_selected, p_head = self.select_indices(
+            teacher_logits
+        )
         student_selected = torch.gather(student_logits, -1, indices)
         student_log_normalizer = torch.logsumexp(student_logits.float(), dim=-1)
         return self.forward_gathered(
@@ -371,5 +394,3 @@ class SubsetMonteCarloKLLoss(BaseLoss):
             f"SubsetMonteCarloKLLoss(k_head={self.k_head}, k_tail={self.k_tail}, "
             f"tail_proposal={self.tail_proposal!r}, reduction={self.reduction!r})"
         )
-
-

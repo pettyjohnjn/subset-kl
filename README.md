@@ -214,6 +214,17 @@ but the right value depends on the model and task.
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+## Documentation Notes
+
+Documentation is built using [MkDocs](https://www.mkdocs.org). 
+However, MkDocs 1.x is unmaintained and MkDocs 2.0 is currently in pre-release. 
+For simplicity, we are leveraging `properdocs` which acts as a drop-in replacement for 
+MkDocs 1.x. To build documentation with this tool simply install it and run:
+
+```shell
+properdocs build
+```
+
 
 ## License
 
