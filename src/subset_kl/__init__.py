@@ -1,10 +1,10 @@
 # src/subset_kl/__init__.py
-"""
+r"""
 # subset-kl: Memory-efficient KL divergence for large vocabularies.
 
 This package provides memory-efficient KL divergence for large-vocabulary
 models. Instead of computing full O(B*T*V) KL, it approximates using top-k
-tokens, reducing memory to O(B*T*k) where k << V.
+tokens, reducing memory to $O(B \cdot T \cdot k)$ where $k \ll V$.
 
 ## Architecture
 This package provides KL math only. It does not handle:
@@ -13,6 +13,7 @@ This package provides KL math only. It does not handle:
 - CUDA kernels for efficient matmul (see indexed_logits for that)
 
 Your model/lens is responsible for:
+
 1. Getting hidden states from the base model
 2. Computing student logits for the selected indices
 
@@ -33,7 +34,7 @@ loss = subset_kl_from_gathered(student_k, teacher_k, attention_mask)
 
 This avoids materializing full [B, T, V] student logits.
 
-## Quick Start (when you have full logits)**
+## Quick Start (when you have full logits)
 ```python
 from subset_kl import SubsetKLLoss
 
@@ -65,16 +66,13 @@ from .base import (
 )
 
 # Core Functional Interface (RECOMMENDED)
-from .core import (
+from .core import (  # Convenience (when you have full logits); Index selection; KL computation on pre-gathered tensors
     TailProposalType,
-    # Convenience (when you have full logits)
     compute_subset_kl,
     compute_subset_mc_kl,
     full_kl,
-    # Index selection
     select_head_tail_indices,
     select_topk_indices,
-    # KL computation on pre-gathered tensors
     subset_kl_from_gathered,
     subset_mc_kl_from_gathered,
 )
