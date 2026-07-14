@@ -8,6 +8,9 @@ nav = mkdocs_gen_files.Nav()
 
 project_dir = "src"
 reference_dir = "docs"
+excludes = [
+    # TODO: Add any files you wish to ignore (if any), such as `foo.py`.
+]
 
 
 def comparator(a: Path, b: Path):
@@ -64,9 +67,9 @@ for path in sorted_paths:
         continue
 
     # print(f"{path=}")
-    # module_path = path.relative_to(project_dir).with_suffix("")
+    module_path = path.relative_to(project_dir).with_suffix("")
+    # module_path = path.with_suffix("")
 
-    module_path = path.with_suffix("")
     doc_path = path.relative_to(project_dir).with_suffix(".md")
     full_doc_path = Path(reference_dir, doc_path)
 

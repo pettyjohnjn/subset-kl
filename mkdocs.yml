@@ -11,19 +11,19 @@ repo_url: https://github.com/pettyjohnjn/subset-kl/
 nav:
   - Home:
       - index.md
-      - home/federated_learning.md
-      - home/globus_compute.md
-      - home/proxystore.md
-  - Getting Started:
-      - getting_started/quickstart.md
-      - getting_started/topologies.md
-      - Strategies:
-          - getting_started/strategies/index.md
-          - getting_started/strategies/what.md
-          - getting_started/strategies/callbacks.md
-          - getting_started/strategies/custom.md
-  - FAQ: faq.md
-  - Publications: publications/index.md
+#      - home/federated_learning.md
+#      - home/globus_compute.md
+#      - home/proxystore.md
+#  - Getting Started:
+#      - getting_started/quickstart.md
+#      - getting_started/topologies.md
+#      - Strategies:
+#          - getting_started/strategies/index.md
+#          - getting_started/strategies/what.md
+#          - getting_started/strategies/callbacks.md
+#          - getting_started/strategies/custom.md
+#  - FAQ: faq.md
+#  - Publications: publications/index.md
   - Docs: docs/
 
 copyright:
@@ -57,8 +57,8 @@ theme:
   name: material
   language: en
   icon: #assets/logos/favicon-dark.svg
-    logo: material/bird
-    favicon: material/bird
+    logo: material/magnify
+    favicon: material/magnify
     repo: fontawesome/brands/github-alt
   #  favicon: ...
   font:
@@ -114,17 +114,13 @@ plugins:
       enable_inventory: true
       handlers:
         python:
-          setup_commands:
-            - import pytkdocs_tweaks
-            - pytkdocs_tweaks.main()
           paths: [ src ]
           load_external_modules: true
-          inherited_members: true
           options:
             docstring_section_style: spacy # list
-            docstring_style: google
+            docstring_style: numpy # google
             group_by_category: true
-            # inherited_members: yes
+            inherited_members: yes
             line_length: 60
             members_order: alphabetical  # source
             merge_init_into_class: yes
