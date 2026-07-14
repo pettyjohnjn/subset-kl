@@ -37,6 +37,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "mkdocs>=1.6.1",
     "torch>=1.10.0",
 ]
 
