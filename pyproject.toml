@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-  { name = "pettyjohnjn" },
+  { name = "Jordan Pettyjohn", email = "pettyjohnjn@gmail.com" },
 ]
 keywords = [
     "pytorch",
@@ -75,10 +75,7 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-# E501: line length handled separately.
-# N806/N812: this is math-heavy code; allow conventional ML notation
-# (uppercase tensor dims like B, T, V, K and `import ... as F`).
-ignore = ["E501", "N806", "N812"]
+ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.9"

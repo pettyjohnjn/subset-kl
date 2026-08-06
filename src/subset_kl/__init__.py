@@ -20,14 +20,14 @@ Your model/lens is responsible for:
 Workflow for Maximum Efficiency
 -------------------------------
 >>> from subset_kl import select_topk_indices, subset_kl_from_gathered
->>>
+>>> 
 >>> # Step 1: Select indices from teacher (this package)
 >>> indices, teacher_k = select_topk_indices(teacher_logits, k=256)
->>>
+>>> 
 >>> # Step 2: Compute student logits ONLY for those indices (YOUR model)
 >>> # This is where you use indexed_logits or your lens's vocab_indices param
 >>> student_k = your_lens.forward(hidden, vocab_indices=indices).logits
->>>
+>>> 
 >>> # Step 3: Compute KL on the subsets (this package)
 >>> loss = subset_kl_from_gathered(student_k, teacher_k, attention_mask)
 
@@ -36,7 +36,7 @@ This avoids materializing full [B, T, V] student logits.
 Quick Start (when you have full logits)
 ---------------------------------------
 >>> from subset_kl import SubsetKLLoss
->>>
+>>> 
 >>> loss_fn = SubsetKLLoss(k=256)
 >>> loss = loss_fn(student_logits, teacher_logits)  # Requires full logits
 
@@ -55,33 +55,55 @@ For V=128k vocabulary, B=2, T=1024:
 
 __version__ = "0.1.0"
 
+# =============================================================================
+# Core Functional Interface (RECOMMENDED)
+# =============================================================================
+from .core import (
+    TailProposalType,
+    # Index selection
+    select_topk_indices,
+    select_head_tail_indices,
+    select_indices_with_sampling,
+    select_indices_with_importance_sampling,
+    # KL computation on pre-gathered tensors
+    subset_kl_from_gathered,
+    subset_k2_kl_from_gathered,
+    subset_k3_kl_from_gathered,
+    subset_is_kl_from_gathered,
+    # Convenience (when you have full logits)
+    compute_subset_kl,
+    compute_subset_k2_kl,
+    compute_subset_k3_kl,
+    compute_subset_is_kl,
+    full_kl,
+)
+
+# =============================================================================
+# Class-based Interface
+# =============================================================================
+from .losses import (
+    SubsetKLLoss,
+    SubsetK2KLLoss,
+    SubsetK3KLLoss,
+    SubsetImportanceSampledKLLoss,
+    KLDivergenceLoss,
+)
+
+# =============================================================================
 # Base Classes and Types
+# =============================================================================
 from .base import (
     BaseLoss,
     ReductionType,
     apply_reduction,
 )
 
-# Core Functional Interface (RECOMMENDED)
-from .core import (
-    TailProposalType,
-    # Convenience (when you have full logits)
-    compute_subset_kl,
-    compute_subset_mc_kl,
-    full_kl,
-    # Index selection
-    select_head_tail_indices,
-    select_topk_indices,
-    # KL computation on pre-gathered tensors
-    subset_kl_from_gathered,
-    subset_mc_kl_from_gathered,
-)
-
-# Class-based Interface
-from .losses import (
-    KLDivergenceLoss,
-    SubsetKLLoss,
-    SubsetMonteCarloKLLoss,
+# =============================================================================
+# Sampling Utilities (Advanced)
+# =============================================================================
+from .sampling import (
+    pps_sample_indices_batched,
+    SamplingDiagnostics,
 )
 
 __all__ = [
@@ -91,17 +113,28 @@ __all__ = [
     "select_topk_indices",
     "TailProposalType",
     "select_head_tail_indices",
+    "select_indices_with_sampling",
+    "select_indices_with_importance_sampling",
     "subset_kl_from_gathered",
-    "subset_mc_kl_from_gathered",
+    "subset_k2_kl_from_gathered",
+    "subset_k3_kl_from_gathered",
+    "subset_is_kl_from_gathered",
     "compute_subset_kl",
-    "compute_subset_mc_kl",
+    "compute_subset_k2_kl",
+    "compute_subset_k3_kl",
+    "compute_subset_is_kl",
     "full_kl",
     # Class-based
     "SubsetKLLoss",
-    "SubsetMonteCarloKLLoss",
+    "SubsetK2KLLoss",
+    "SubsetK3KLLoss",
+    "SubsetImportanceSampledKLLoss",
     "KLDivergenceLoss",
     # Base
     "BaseLoss",
     "ReductionType",
     "apply_reduction",
+    # Sampling
+    "pps_sample_indices_batched",
+    "SamplingDiagnostics",
 ]
